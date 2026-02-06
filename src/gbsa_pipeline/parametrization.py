@@ -7,31 +7,18 @@ from pathlib import Path
 from typing import Any, Union
 
 import BioSimSpace as BSS
+import sire as sr
+
 
 PathLike = Union[str, Path]
 
-
 def load_protein_pdb(pdb_path: PathLike) -> BSS._SireWrappers.Molecule:
-    """Load a protein from a PDB file and return the (first) molecule.
-
-    Note: BioSimSpace reads files via IO.readMolecules. :contentReference[oaicite:4]{index=4}
-    """
+    """Load a protein from a PDB file and return the (first) molecule."""
     system = BSS.IO.readMolecules(str(pdb_path))
     mols = system.getMolecules()
     if not mols:
         raise ValueError(f"No molecules found in {pdb_path}")
     return mols[0]
-
-
-def load_ligand_sdf(sdf_path: PathLike, index: int = 0) -> BSS._SireWrappers.Molecule:
-    """Load a ligand from an SDF file and return molecule at `index`."""
-    system = BSS.IO.readMolecules(str(sdf_path))
-    mols = system.getMolecules()
-    if not mols:
-        raise ValueError(f"No molecules found in {sdf_path}")
-    if index < 0 or index >= len(mols):
-        raise IndexError(f"index={index} out of range (0..{len(mols)-1})")
-    return mols[index]
 
 
 def parameterise_protein_amber(
@@ -75,10 +62,7 @@ def parameterise_ligand_gaff2(
     charge_method: str = "BCC",
     work_dir: PathLike | None = None,
 ) -> BSS._SireWrappers.Molecule:
-    """Parameterise a ligand using GAFF2.
-
-    BioSimSpace.Parameters.gaff2 supports `net_charge` and `charge_method` and returns a parameterised Molecule. :contentReference[oaicite:9]{index=9}
-    """
+    """Parameterise a ligand using GAFF2."""
     kwargs = {
         "net_charge": net_charge,
         "charge_method": charge_method,
@@ -121,7 +105,9 @@ def load_and_parameterise(
     protein = load_protein_pdb(protein_pdb)
     ligand = ligand_sire
 
-    p_protein = parameterise_protein_amber(protein, ff=protein_ff, work_dir=work_dir)
+    p_protein = parameterise_protein_amber(
+        protein, ff=protein_ff, work_dir=work_dir
+    )
     p_ligand = parameterise_ligand_gaff2(
         ligand,
         net_charge=ligand_net_charge,
@@ -135,7 +121,3 @@ def load_and_parameterise(
         ligand=p_ligand,
         system=system,
     )
-
-def export_gromacs_top_gro(system: BSS._SireWrappers.System, prefix: str) -> list[str]:
-    """Export gromacs top gro file for `system`."""
-    return BSS.IO.saveMolecules(prefix, system, ["gro87", "grotop"])
