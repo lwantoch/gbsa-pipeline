@@ -1,5 +1,6 @@
 from __future__ import annotations
 import BioSimSpace as BSS
+import pytest
 from src.gbsa_pipeline.ligand_preparation import (
     load_ligand_sdf,
     ligand_standardizer,
@@ -21,6 +22,12 @@ def test_hydrogens_added() -> None:
 
     n_atoms = mol.GetNumAtoms()
     assert n_atoms == 72
+
+
+def test_read_empty() -> None:
+
+    with pytest.raises(OSError):
+        load_ligand_sdf("testdata/empty.sdf.sdf")
 
 
 def test_ligand_conversion() -> None:
