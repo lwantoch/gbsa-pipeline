@@ -6,12 +6,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import sire as sr
 import BioSimSpace as BSS
-
 import argparse
 
-
+from gbsa_pipeline.equilibration import run_heating
 from gbsa_pipeline.ligand_preparation import ligand_converter
 from gbsa_pipeline.parametrization import load_and_parameterise
 from gbsa_pipeline.solvation_box import run_solvation
@@ -76,11 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.ligand_sdf.exists():
         raise FileNotFoundError(args.ligand_sdf)
 
-    # Preparing ligand
-    ligand_prepared = ligand_converter(sdf_path=args.ligand_sdf)
-
-    # converting sire to bss format
-    bss_ligand = sr.convert.to(ligand_prepared, "BioSimSpace")
+    # Preparing ligand - Reading, Standardizing, protonating and converting to sire
+    bss_ligand = ligand_converter(sdf_path=args.ligand_sdf)
 
     # Calculating ligand parameter and adding protein forcefield
     parametrized_complex = load_and_parameterise(
@@ -92,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
         work_dir=args.work_dir,
     )
 
+    # pickle.dump(parametrized_complex, "parametrized_complex.pickle")
+    # pickle.load("parametrized_complex.pickle")
+
     logging.info("Parametrized the complex!")
 
     solvated_box = run_solvation(
@@ -100,16 +98,21 @@ def main(argv: list[str] | None = None) -> int:
         box_size=args.box_size,
     )
 
+    logging.info("Solvation Done!")
+
     BSS.IO.saveMolecules("box.pdb", solvated_box, fileformat="PDB")
 
-    minimized = run_minimization(nsteps=args.min_steps, solvated=solvated_box)
+    minimized = run_minimization(nsteps=args.min_steps, system=solvated_box)
 
+    logging.info("We are done with minimization!")
 
-#    BSS.IO.saveMolecules(
-#       "minimized.pdb",
-#      minimized,
-#      fileformat="PDB"
-# )
+    BSS.IO.saveMolecules("minimized.pdb", minimized, fileformat="PDB")
+
+    equilibrated_system = run_heating(500 * BSS.Units.Time.picosecond, minimized)
+
+    BSS.IO.saveMolecules("equilibrated.pdb", equilibrated_system, fileformat="PDB")
+
+    logging.info("Heating done")
 
 
 if __name__ == "__main__":
