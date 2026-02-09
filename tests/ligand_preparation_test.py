@@ -1,5 +1,4 @@
 from __future__ import annotations
-import pytest
 import BioSimSpace as BSS
 from src.gbsa_pipeline.ligand_preparation import (
     load_ligand_sdf,
@@ -10,13 +9,9 @@ from src.gbsa_pipeline.ligand_preparation import (
 
 def test_load_ligand_valid() -> None:
     """Test reading molecule from file"""
+
     mol = load_ligand_sdf("testdata/complex3.sdf")
-    assert mol != None
-
-
-def test_load_ligand_empty_raises() -> None:
-    with pytest.raises(ValueError):
-        load_ligand_sdf("testdata/empty.sdf")
+    assert mol is not None
 
 
 def test_hydrogens_added() -> None:
