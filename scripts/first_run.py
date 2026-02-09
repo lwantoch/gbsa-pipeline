@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 
 import BioSimSpace as BSS
-import argparse
+import argparse, time, logging
 
 from gbsa_pipeline.equilibration import run_heating
 from gbsa_pipeline.ligand_preparation import ligand_converter
@@ -106,13 +106,16 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.info("We are done with minimization!")
 
-    BSS.IO.saveMolecules("minimized.pdb", minimized, fileformat="PDB")
+    BSS.IO.saveMolecules("minimized.pdb", minimized, fileformat="PDB"
 
+    t0 = time.time()
     equilibrated_system = run_heating(500 * BSS.Units.Time.picosecond, minimized)
 
+    logging.info("After heating (%.1fs)", time.time() - t0)
+    t1 = time.time()
     BSS.IO.saveMolecules("equilibrated.pdb", equilibrated_system, fileformat="PDB")
 
-    logging.info("Heating done")
+    logging.info("Heating done(%.1fs)", time.time() - t1)")
 
 
 if __name__ == "__main__":
