@@ -7,10 +7,9 @@ from pathlib import Path
 from typing import Any, Union
 
 import BioSimSpace as BSS
-import sire as sr
-
 
 PathLike = Union[str, Path]
+
 
 def load_protein_pdb(pdb_path: PathLike) -> BSS._SireWrappers.Molecule:
     """Load a protein from a PDB file and return the (first) molecule."""
@@ -105,9 +104,7 @@ def load_and_parameterise(
     protein = load_protein_pdb(protein_pdb)
     ligand = ligand_sire
 
-    p_protein = parameterise_protein_amber(
-        protein, ff=protein_ff, work_dir=work_dir
-    )
+    p_protein = parameterise_protein_amber(protein, ff=protein_ff, work_dir=work_dir)
     p_ligand = parameterise_ligand_gaff2(
         ligand,
         net_charge=ligand_net_charge,
