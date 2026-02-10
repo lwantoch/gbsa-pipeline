@@ -1,14 +1,25 @@
+from __future__ import annotations
+
 import BioSimSpace as BSS
+
 from src.gbsa_pipeline.parametrization import load_protein_pdb
 from src.gbsa_pipeline.parametrization import parameterise_protein_amber
 from src.gbsa_pipeline.solvation_box import run_solvation
 
 
 def test_solvation() -> None:
-    mol_1 = load_protein_pdb("tests/testdata/test1.pdb")
-    mol_2 = parameterise_protein_amber(mol_1)
-    run_solvation(system=mol_2, water_model="tip3p", box_size=8)
+    # Load raw protein
+    mol = load_protein_pdb("tests/testdata/test1.pdb")
 
-    assert not mol_1.nAtoms() == mol_2.nAtoms()
+    # Parameterise -> returns Molecule
+    mol_param = parameterise_protein_amber(mol, ff="ff14SB")
 
-    from src.gbsa_pipeline.ligand_preparation import load_ligand_sdf
+    # Create System explicitly
+    system = BSS._SireWrappers.System(mol_param)
+    n_atoms_before = system.nAtoms()
+
+    # Solvate (assumed in-place)
+    solvated = run_solvation(system=system, water_model="tip3p", box_size=8)
+
+    # Check that solvent was added
+    assert solvated.nAtoms() > n_atoms_before
