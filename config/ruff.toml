@@ -26,6 +26,7 @@ select = [
     "YTT",
 ]
 ignore = [
+    "N817",    # CamelCase
     "PT005", # Test fixture underscore
     "COM812",  # formatter conflict
     "ISC001",  # formatter conflict
