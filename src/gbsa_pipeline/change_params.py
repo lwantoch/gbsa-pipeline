@@ -53,6 +53,12 @@ def format_gmx_value(value: Any) -> str:
     raise TypeError(f"Unsupported .mdp value type: {type(value).__name__}")
 
 
+def is_comment(line: str) -> bool:
+    """Return True if line is blank or a full-line comment."""
+    stripped = line.lstrip()
+    return not stripped or stripped.startswith(("#", ";"))
+
+
 def set_mdp_key(lines: list[str], key: str, value: Any, *, inplace: bool = True) -> list[str]:
     """Update or append `key = value` in .mdp-like lines, preserving inline comments.
 
@@ -63,23 +69,21 @@ def set_mdp_key(lines: list[str], key: str, value: Any, *, inplace: bool = True)
     wanted = key.strip()
 
     for i, ln in enumerate(out):
-        stripped = ln.lstrip()
-        if not stripped or stripped.startswith(("#", ";")):
+        if is_comment(ln):
             continue
 
         left, sep, right = ln.partition("=")
-        if not sep:
-            continue
-        if left.strip() != wanted:
+        if not sep or left.strip() != wanted:
             continue
 
         before_comment, comment = _split_inline_comment(right)
         prefix = _leading_ws(before_comment)  # preserve whitespace before old value
         out[i] = f"{left}={prefix}{mdp_value}{comment}"
-        return out
+        break
+    else:
+        # key not found -> append in aligned format
+        out.append(f"{wanted:<28} = {mdp_value}")
 
-    # key not found -> append in aligned format
-    out.append(f"{wanted:<28} = {mdp_value}")
     return out
 
 

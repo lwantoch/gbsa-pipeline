@@ -66,7 +66,6 @@ class GromacsCustom(BSS.Protocol.Custom):
             value = value.value
 
         if allowed_values is not None:
-            # minimal check; no fancy messaging
             if not isinstance(value, str):
                 raise TypeError(f"{key} must be str when allowed_values is provided")
             v = value.strip().lower()
