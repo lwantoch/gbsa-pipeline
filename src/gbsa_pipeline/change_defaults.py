@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from collections.abc import Mapping
+from enum import Enum
+from tempfile import NamedTemporaryFile
+from typing import Any
 
 import BioSimSpace as BSS
+from pydantic import BaseModel, ConfigDict
 
-# your enums live in another file → import them here (adjust module path!)
 from gbsa_pipeline.change_defaults_enum import (
     Barostat,
     CommMode,
@@ -19,410 +19,150 @@ from gbsa_pipeline.change_defaults_enum import (
     CoulombType,
     DispCorr,
     Integrator,
+    LJPMECombination,
     NghCutoffScheme,
     VDWModifier,
     VDWType,
 )
-from gbsa_pipeline.change_params import change_default_params
-from gbsa_pipeline.gmx_edit_defaults import apply_changes
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
-    from enum import StrEnum
+from gbsa_pipeline.change_params import format_gmx_value
 
 logger = logging.getLogger(__name__)
 
 
-def _enum_values(enum_cls: type[StrEnum]) -> set[str]:
-    return {m.value for m in enum_cls}
+class GromacsParams(BaseModel):
+    """MDP parameters with validated defaults and serialization helpers."""
 
+    model_config = ConfigDict(frozen=True, validate_default=True)
 
-# ============================================================================
-# Protocol wrapper
-# ============================================================================
+    integrator: Integrator = Integrator.LEAP_FROG
+    tinit: float = 0.0
+    dt: float = 0.001
+    nsteps: int = 500
+    init_step: int = 0
+    simulation_part: int = 1
+    mts: bool = True
+    mass_repartition_factor: float = 1.0
+    comm_mode: CommMode = CommMode.LINEAR
+    nstcomm: int = 100
+    bd_fric: float = 0.0
+    ld_seed: int = 1845489648
+    emtol: float = 10.0
+    emstep: float = 0.01
+    niter: int = 20
+    fcstep: int = 0
+    nstcgsteep: int = 1000
+    nbfgscorr: int = 10
+    rtpi: float = 0.05
+    nstxout: int = 0
+    nstvout: int = 0
+    nstfout: int = 0
+    nstlog: int = 500
+    nstcalcenergy: int = 100
+    nstenergy: int = 500
+    nstxout_compressed: int = 500
+    compressed_x_precision: int = 1000
+    cutoff_scheme: NghCutoffScheme = NghCutoffScheme.VERLET
+    nstlist: int = 20
+    pbc: str = "xyz"
+    periodic_molecules: bool = False
+    verlet_buffer_tolerance: float = 0.005
+    verlet_buffer_pressure_tolerance: float = 0.5
+    rlist: float = 1.221
+    coulomb_modifier: CoulombModifier = CoulombModifier.POTENTIAL_SHIFT
+    rcoulomb_switch: float = 0.0
+    rcoulomb: float = 1.2
+    epsilon_r: float = 1.0
+    epsilon_rf: float | str = "inf"
+    table_extension: float = 1.0
+    vdw_type: VDWType = VDWType.CUT_OFF
+    vdw_modifier: VDWModifier = VDWModifier.FORCE_SWITCH
+    rvdw_switch: float = 1.0
+    rvdw: float = 1.2
+    dispcorr: DispCorr = DispCorr.NO
+    coulombtype: CoulombType = CoulombType.PME
+    fourierspacing: float = 0.16
+    fourier_nx: int = 52
+    fourier_ny: int = 52
+    fourier_nz: int = 52
+    pme_order: int = 4
+    ewald_rtol: float = 1e-5
+    ewald_geometry: str = "3d"
+    epsilon_surface: float = 0.0
+    ewald_rtol_lj: float = 0.001
+    lj_pme_comb_rule: LJPMECombination = LJPMECombination.GEOMETRIC
+    pcoupl: Barostat = Barostat.NO
+    refcoord_scaling: str = "No"
+    constraint_algorithm: ConstraintsAlgorithms = ConstraintsAlgorithms.LINCS
+    continuation: bool = False
+    shake_sor: str = "no"
+    shake_tol: float = 0.0001
+    lincs_order: int = 4
+    lincs_warnangle: float = 30
+    nwall: int = 0
+    wall_type: str = "9-3"
+    wall_r_linpot: float = -1
+    wall_ewald_zfac: float = 3
+    qmmm: bool = False
+    pull: bool = False
+    awh: bool = False
+    rotation: bool = False
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> GromacsParams:
+        """Instantiate from a mapping using hyphenated keys."""
+        kwargs = {}
+
+        for key, value in mapping.items():
+            field_name = key.replace("-", "_")
+            if field_name not in cls.model_fields:
+                raise KeyError(f"Unknown parameter key: {key}")
+            kwargs[field_name] = value
+
+        return cls(**kwargs)
+
+    def to_mapping(self) -> dict[str, Any]:
+        """Return a GROMACS-style mapping (underscores -> hyphens)."""
+        result = {}
+
+        for field_name, field_value in self.model_dump().items():
+            serialized = field_value.value if isinstance(field_value, Enum) else field_value
+
+            key = field_name.replace("_", "-")
+            result[key] = serialized
+
+        return result
+
+    def to_mdp_lines(self) -> list[str]:
+        """Render parameters as mdp lines without any base file."""
+        lines: list[str] = []
+        for key, value in self.to_mapping().items():
+            lines.append(f"{key} = {format_gmx_value(value)}")
+        return lines
+
+    def to_mdp(self) -> str:
+        """Render parameters as mdp text (newline-terminated)."""
+        return "\n".join(self.to_mdp_lines()) + "\n"
 
 
 class GromacsCustom(BSS.Protocol.Custom):
-    """Thin wrapper for a custom GROMACS protocol with one setter per mdp key."""
+    """Thin wrapper bridging `GromacsParams` to `BSS.Protocol.Custom`."""
 
-    def __init__(self, config: str | Path):
-        """Initialise the protocol from a base mdp/config file."""
-        super().__init__(config)
-
-    # ------------------------------------------------------------------------
-    # Core setter
-    # ------------------------------------------------------------------------
-
-    def _set_parameter(
+    def __init__(
         self,
-        parameter: str,
-        value: Any,
-        allowed_values: Iterable[str] | None = None,
-    ) -> GromacsCustom:
-        """Internal: set an mdp parameter. Optional lightweight allowed-values check."""
-        key = parameter.strip()
+        params: GromacsParams | Mapping[str, Any] | None = None,
+    ) -> None:
+        """Create a custom protocol from params only (no base mdp)."""
+        self.params = (GromacsParams.from_mapping(params) if isinstance(params, Mapping) else params) or GromacsParams()
 
-        if hasattr(value, "value"):  # Enum/StrEnum
-            value = value.value
+        lines = self.params.to_mdp_lines()
 
-        if allowed_values is not None:
-            if not isinstance(value, str):
-                raise TypeError(f"{key} must be str when allowed_values is provided")
-            v = value.strip().lower()
-            canonical = next((a for a in allowed_values if a.lower() == v), None)
-            if canonical is None:
-                raise ValueError(f"Invalid value for {key}: {value!r}")
-            value = canonical
+        with NamedTemporaryFile("w", suffix=".mdp", delete=False, encoding="utf-8") as tmp:
+            tmp.write("\n".join(lines) + "\n")
+            mdp_path = tmp.name
 
-        self._parameters[key] = value
-        return self
+        super().__init__(mdp_path)
 
-    # =========================================================================
-    # Run control
-    # =========================================================================
-
-    def set_integrator(self, value: str) -> GromacsCustom:
-        """Set 'integrator' (integration algorithm)."""
-        allowed = _enum_values(Integrator)
-        return self._set_parameter("integrator", value, allowed)
-
-    def set_tinit(self, value: float) -> GromacsCustom:
-        """Set 'tinit' (starting time, ps)."""
-        return self._set_parameter("tinit", value)
-
-    def set_dt(self, value: float) -> GromacsCustom:
-        """Set 'dt' (time step, ps)."""
-        return self._set_parameter("dt", value)
-
-    def set_nsteps(self, value: int) -> GromacsCustom:
-        """Set 'nsteps' (number of steps)."""
-        return self._set_parameter("nsteps", value)
-
-    def set_init_step(self, value: int) -> GromacsCustom:
-        """Set 'init-step' (initial step index)."""
-        return self._set_parameter("init-step", value)
-
-    def set_simulation_part(self, value: int) -> GromacsCustom:
-        """Set 'simulation-part' (part index for split runs)."""
-        return self._set_parameter("simulation-part", value)
-
-    def set_mts(self, *, value: bool) -> GromacsCustom:
-        """Set 'mts' (enable multiple time stepping)."""
-        return self._set_parameter("mts", value)
-
-    def set_mass_repartition_factor(self, value: float) -> GromacsCustom:
-        """Set 'mass-repartition-factor' (HMR-like mass repartition factor)."""
-        return self._set_parameter("mass-repartition-factor", value)
-
-    def set_comm_mode(self, value: str) -> GromacsCustom:
-        """Set 'comm-mode' (center-of-mass motion removal mode)."""
-        allowed = _enum_values(CommMode)
-        return self._set_parameter("comm-mode", value, allowed)
-
-    def set_nstcomm(self, value: int) -> GromacsCustom:
-        """Set 'nstcomm' (frequency of COM motion removal)."""
-        return self._set_parameter("nstcomm", value)
-
-    def set_bd_fric(self, value: float) -> GromacsCustom:
-        """Set 'bd-fric' (Brownian dynamics friction)."""
-        return self._set_parameter("bd-fric", value)
-
-    def set_ld_seed(self, value: int) -> GromacsCustom:
-        """Set 'ld-seed' (random seed for stochastic dynamics)."""
-        return self._set_parameter("ld-seed", value)
-
-    # =========================================================================
-    # Minimisation
-    # =========================================================================
-
-    def set_emtol(self, value: float) -> GromacsCustom:
-        """Set 'emtol' (EM convergence criterion)."""
-        return self._set_parameter("emtol", value)
-
-    def set_emstep(self, value: float) -> GromacsCustom:
-        """Set 'emstep' (EM step size)."""
-        return self._set_parameter("emstep", value)
-
-    def set_niter(self, value: int) -> GromacsCustom:
-        """Set 'niter' (max minimisation iterations)."""
-        return self._set_parameter("niter", value)
-
-    def set_fcstep(self, value: int) -> GromacsCustom:
-        """Set 'fcstep' (flexible constraints update interval)."""
-        return self._set_parameter("fcstep", value)
-
-    def set_nstcgsteep(self, value: int) -> GromacsCustom:
-        """Set 'nstcgsteep' (SD steps before CG)."""
-        return self._set_parameter("nstcgsteep", value)
-
-    def set_nbfgscorr(self, value: int) -> GromacsCustom:
-        """Set 'nbfgscorr' (L-BFGS history size)."""
-        return self._set_parameter("nbfgscorr", value)
-
-    def set_rtpi(self, value: float) -> GromacsCustom:
-        """Set 'rtpi' (reference temperature for special integrators)."""
-        return self._set_parameter("rtpi", value)
-
-    # =========================================================================
-    # Output
-    # =========================================================================
-
-    def set_nstxout(self, value: int) -> GromacsCustom:
-        """Set 'nstxout' (coordinate output frequency)."""
-        return self._set_parameter("nstxout", value)
-
-    def set_nstvout(self, value: int) -> GromacsCustom:
-        """Set 'nstvout' (velocity output frequency)."""
-        return self._set_parameter("nstvout", value)
-
-    def set_nstfout(self, value: int) -> GromacsCustom:
-        """Set 'nstfout' (force output frequency)."""
-        return self._set_parameter("nstfout", value)
-
-    def set_nstlog(self, value: int) -> GromacsCustom:
-        """Set 'nstlog' (log output frequency)."""
-        return self._set_parameter("nstlog", value)
-
-    def set_nstcalcenergy(self, value: int) -> GromacsCustom:
-        """Set 'nstcalcenergy' (energy calculation frequency)."""
-        return self._set_parameter("nstcalcenergy", value)
-
-    def set_nstenergy(self, value: int) -> GromacsCustom:
-        """Set 'nstenergy' (energy write frequency)."""
-        return self._set_parameter("nstenergy", value)
-
-    def set_nstxout_compressed(self, value: int) -> GromacsCustom:
-        """Set 'nstxout-compressed' (compressed trajectory output frequency)."""
-        return self._set_parameter("nstxout-compressed", value)
-
-    def set_compressed_x_precision(self, value: int) -> GromacsCustom:
-        """Set 'compressed-x-precision' (XTC precision setting)."""
-        return self._set_parameter("compressed-x-precision", value)
-
-    # =========================================================================
-    # PBC + neighbor list
-    # =========================================================================
-
-    def set_cutoff_scheme(self, value: str) -> GromacsCustom:
-        """Set 'cutoff-scheme' (neighbor list scheme)."""
-        allowed = _enum_values(NghCutoffScheme)
-        return self._set_parameter("cutoff-scheme", value, allowed)
-
-    def set_nstlist(self, value: int) -> GromacsCustom:
-        """Set 'nstlist' (neighbor list update frequency)."""
-        return self._set_parameter("nstlist", value)
-
-    def set_pbc(self, value: str) -> GromacsCustom:
-        """Set 'pbc' (periodic boundary conditions)."""
-        allowed = {"xyz", "no", "xy", "screw"}
-        return self._set_parameter("pbc", value, allowed)
-
-    def set_periodic_molecules(self, *, value: bool) -> GromacsCustom:
-        """Set 'periodic-molecules' (treat molecules as periodic)."""
-        return self._set_parameter("periodic-molecules", value)
-
-    def set_verlet_buffer_tolerance(self, value: float) -> GromacsCustom:
-        """Set 'verlet-buffer-tolerance' (target energy drift for buffer sizing)."""
-        return self._set_parameter("verlet-buffer-tolerance", value)
-
-    def set_verlet_buffer_pressure_tolerance(self, value: float) -> GromacsCustom:
-        """Set 'verlet-buffer-pressure-tolerance' (target pressure error for buffer sizing)."""
-        return self._set_parameter("verlet-buffer-pressure-tolerance", value)
-
-    def set_rlist(self, value: float) -> GromacsCustom:
-        """Set 'rlist' (neighbor list cutoff, nm)."""
-        return self._set_parameter("rlist", value)
-
-    # =========================================================================
-    # Short-range Coulomb
-    # =========================================================================
-
-    def set_coulomb_modifier(self, value: str) -> GromacsCustom:
-        """Set 'coulomb-modifier' (Coulomb potential modifier near cutoff)."""
-        allowed = _enum_values(CoulombModifier)
-        return self._set_parameter("coulomb-modifier", value, allowed)
-
-    def set_rcoulomb_switch(self, value: float) -> GromacsCustom:
-        """Set 'rcoulomb-switch' (Coulomb switching radius, nm)."""
-        return self._set_parameter("rcoulomb-switch", value)
-
-    def set_rcoulomb(self, value: float) -> GromacsCustom:
-        """Set 'rcoulomb' (Coulomb cutoff radius, nm)."""
-        return self._set_parameter("rcoulomb", value)
-
-    def set_epsilon_r(self, value: float) -> GromacsCustom:
-        """Set 'epsilon-r' (relative dielectric constant)."""
-        return self._set_parameter("epsilon-r", value)
-
-    def set_epsilon_rf(self, value: str | float) -> GromacsCustom:
-        """Set 'epsilon-rf' (reaction-field dielectric constant)."""
-        return self._set_parameter("epsilon-rf", value)
-
-    def set_table_extension(self, value: float) -> GromacsCustom:
-        """Set 'table-extension' (extend table range beyond cutoffs, nm)."""
-        return self._set_parameter("table-extension", value)
-
-    # =========================================================================
-    # Short-range VdW
-    # =========================================================================
-
-    def set_vdw_type(self, value: str) -> GromacsCustom:
-        """Set 'vdw-type' (van der Waals interaction type)."""
-        allowed = _enum_values(VDWType)
-        return self._set_parameter("vdw-type", value, allowed)
-
-    def set_vdw_modifier(self, value: str) -> GromacsCustom:
-        """Set 'vdw-modifier' (LJ modifier near cutoff)."""
-        allowed = _enum_values(VDWModifier)
-        return self._set_parameter("vdw-modifier", value, allowed)
-
-    def set_rvdw_switch(self, value: float) -> GromacsCustom:
-        """Set 'rvdw-switch' (LJ switching radius, nm)."""
-        return self._set_parameter("rvdw-switch", value)
-
-    def set_rvdw(self, value: float) -> GromacsCustom:
-        """Set 'rvdw' (LJ cutoff radius, nm)."""
-        return self._set_parameter("rvdw", value)
-
-    def set_dispcorr(self, value: str) -> GromacsCustom:
-        """Set 'dispcorr' (long-range dispersion correction mode)."""
-        allowed = _enum_values(DispCorr)
-        return self._set_parameter("dispcorr", value, allowed)
-
-    # =========================================================================
-    # Long-range electrostatics / PME
-    # =========================================================================
-
-    def set_coulombtype(self, value: str) -> GromacsCustom:
-        """Set 'coulombtype' (electrostatics method)."""
-        allowed = _enum_values(CoulombType)
-        return self._set_parameter("coulombtype", value, allowed)
-
-    def set_fourierspacing(self, value: float) -> GromacsCustom:
-        """Set 'fourierspacing' (PME grid spacing, nm)."""
-        return self._set_parameter("fourierspacing", value)
-
-    def set_fourier_nx(self, value: int) -> GromacsCustom:
-        """Set 'fourier-nx' (PME grid size X)."""
-        return self._set_parameter("fourier-nx", value)
-
-    def set_fourier_ny(self, value: int) -> GromacsCustom:
-        """Set 'fourier-ny' (PME grid size Y)."""
-        return self._set_parameter("fourier-ny", value)
-
-    def set_fourier_nz(self, value: int) -> GromacsCustom:
-        """Set 'fourier-nz' (PME grid size Z)."""
-        return self._set_parameter("fourier-nz", value)
-
-    def set_pme_order(self, value: int) -> GromacsCustom:
-        """Set 'pme-order' (PME interpolation order)."""
-        return self._set_parameter("pme-order", value)
-
-    # =========================================================================
-    # Ewald / LJ-PME
-    # =========================================================================
-
-    def set_ewald_rtol(self, value: float) -> GromacsCustom:
-        """Set 'ewald-rtol' (PME/Ewald relative tolerance)."""
-        return self._set_parameter("ewald-rtol", value)
-
-    def set_ewald_geometry(self, value: str) -> GromacsCustom:
-        """Set 'ewald-geometry' (Ewald boundary geometry)."""
-        return self._set_parameter("ewald-geometry", value)
-
-    def set_epsilon_surface(self, value: float) -> GromacsCustom:
-        """Set 'epsilon-surface' (surface dielectric for non-3D Ewald)."""
-        return self._set_parameter("epsilon-surface", value)
-
-    def set_ewald_rtol_lj(self, value: float) -> GromacsCustom:
-        """Set 'ewald-rtol-lj' (LJ-PME relative tolerance)."""
-        return self._set_parameter("ewald-rtol-lj", value)
-
-    def set_lj_pme_comb_rule(self, value: str) -> GromacsCustom:
-        """Set 'lj-pme-comb-rule' (combination rule for LJ-PME)."""
-        return self._set_parameter("lj-pme-comb-rule", value)
-
-    # =========================================================================
-    # Pressure control
-    # =========================================================================
-
-    def set_pcoupl(self, value: str) -> GromacsCustom:
-        """Set 'pcoupl' (pressure coupling algorithm)."""
-        allowed = _enum_values(Barostat)
-        return self._set_parameter("pcoupl", value, allowed)
-
-    def set_refcoord_scaling(self, value: str) -> GromacsCustom:
-        """Set 'refcoord-scaling' (reference coordinate scaling under P-coupling)."""
-        return self._set_parameter("refcoord-scaling", value)
-
-    # =========================================================================
-    # Constraints
-    # =========================================================================
-
-    def set_constraint_algorithm(self, value: str) -> GromacsCustom:
-        """Set 'constraint-algorithm' (constraints solver)."""
-        allowed = _enum_values(ConstraintsAlgorithms)
-        return self._set_parameter("constraint-algorithm", value, allowed)
-
-    def set_continuation(self, *, value: bool) -> GromacsCustom:
-        """Set 'continuation' (continue run from previous state)."""
-        return self._set_parameter("continuation", value)
-
-    def set_shake_sor(self, value: str) -> GromacsCustom:
-        """Set 'shake-sor' (SHAKE SOR settings)."""
-        return self._set_parameter("shake-sor", value)
-
-    def set_shake_tol(self, value: float) -> GromacsCustom:
-        """Set 'shake-tol' (SHAKE tolerance)."""
-        return self._set_parameter("shake-tol", value)
-
-    def set_lincs_order(self, value: int) -> GromacsCustom:
-        """Set 'lincs-order' (LINCS expansion order)."""
-        return self._set_parameter("lincs-order", value)
-
-    def set_lincs_warnangle(self, value: float) -> GromacsCustom:
-        """Set 'lincs-warnangle' (LINCS warning angle, degrees)."""
-        return self._set_parameter("lincs-warnangle", value)
-
-    # =========================================================================
-    # Walls
-    # =========================================================================
-
-    def set_nwall(self, value: int) -> GromacsCustom:
-        """Set 'nwall' (number of walls)."""
-        return self._set_parameter("nwall", value)
-
-    def set_wall_type(self, value: str) -> GromacsCustom:
-        """Set 'wall-type' (wall potential type)."""
-        return self._set_parameter("wall-type", value)
-
-    def set_wall_r_linpot(self, value: float) -> GromacsCustom:
-        """Set 'wall-r-linpot' (linear-potential wall parameter)."""
-        return self._set_parameter("wall-r-linpot", value)
-
-    def set_wall_ewald_zfac(self, value: float) -> GromacsCustom:
-        """Set 'wall-ewald-zfac' (Ewald z scaling factor for walls)."""
-        return self._set_parameter("wall-ewald-zfac", value)
-
-    # =========================================================================
-    # Biasing / restraints
-    # =========================================================================
-
-    def set_qmmm(self, *, value: bool) -> GromacsCustom:
-        """Set 'qmmm' (enable QM/MM coupling)."""
-        return self._set_parameter("qmmm", value)
-
-    def set_pull(self, *, value: bool) -> GromacsCustom:
-        """Set 'pull' (enable pulling code)."""
-        return self._set_parameter("pull", value)
-
-    def set_awh(self, *, value: bool) -> GromacsCustom:
-        """Set 'awh' (enable AWH method)."""
-        return self._set_parameter("awh", value)
-
-    def set_rotation(self, *, value: bool) -> GromacsCustom:
-        """Set 'rotation' (enable enforced rotation)."""
-        return self._set_parameter("rotation", value)
+        self._parameters = self.params.to_mapping()
 
 
 # ============================================================================
@@ -431,31 +171,28 @@ class GromacsCustom(BSS.Protocol.Custom):
 
 
 def run_gro_custom(
-    parameters: str | Path,
+    parameters: Mapping[str, Any] | GromacsParams | None,
     system: BSS._SireWrappers.System,
     changes: Mapping[str, Any] | None = None,
-    changes_file: str | Path | None = None,
+    params: Mapping[str, Any] | GromacsParams | None = None,
 ) -> tuple[BSS._SireWrappers.System, BSS.Protocol]:
-    """Create protocol, apply overrides (file + mapping), run GROMACS, return (system, protocol)."""
-    custom_protocol = GromacsCustom(parameters)
+    """Create protocol from params only, run GROMACS, return (system, protocol)."""
+    base_params = (
+        GromacsParams.from_mapping(parameters) if isinstance(parameters, Mapping) else parameters
+    ) or GromacsParams()
 
-    lines = custom_protocol.getConfig()
-
-    parsed_from_file: dict[str, Any] | None = None
-    if changes_file is not None:
-        parsed_from_file = apply_changes(lines, changes_file)
+    merged = base_params.to_mapping()
 
     if changes is not None:
-        change_default_params(lines, changes)
+        merged.update(changes)
 
-    custom_protocol.setConfig(lines)
+    if params is not None:
+        merged.update(params if isinstance(params, Mapping) else params.to_mapping())
 
-    if parsed_from_file:
-        logger.info(
-            "Applied %d mdp overrides from file: %s",
-            len(parsed_from_file),
-            changes_file,
-        )
+    final_params = GromacsParams.from_mapping(merged)
+
+    custom_protocol = GromacsCustom(params=final_params)
+
     if changes:
         logger.info("Applied %d mdp overrides from mapping.", len(changes))
 

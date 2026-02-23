@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from typing import Any
 
 
 def _leading_ws(s: str) -> str:
@@ -85,9 +82,3 @@ def set_mdp_key(lines: list[str], key: str, value: Any, *, inplace: bool = True)
         out.append(f"{wanted:<28} = {mdp_value}")
 
     return out
-
-
-def change_default_params(lines: list[str], params: Mapping[str, Any]) -> None:
-    """Apply multiple .mdp parameter changes to `lines` (in-place)."""
-    for k, v in params.items():
-        set_mdp_key(lines, k, v, inplace=True)

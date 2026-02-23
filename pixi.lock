@@ -2410,12 +2410,13 @@ packages:
   timestamp: 1770387898414
 - pypi: ./
   name: gbsa-pipeline
-  version: 0.1.dev16+g7ff5bd4.d20260220
-  sha256: 6cf5fc10a3c8211f70b9007d805db55adf3ab1b3940d49e7222feab8ad67d763
+  version: 0.1.dev16+gff0fff7.d20260223
+  sha256: 21292b9a7454122fd4be6ffe53294c2dbbed931d12ae9b2ed6d6aae533ee4501
   requires_dist:
   - molvs>=0.1.1,<0.2
   - pre-commit>=4.5.1,<5
   - meeko>=0.5,<0.6
+  - pydantic
   requires_python: '>=3.10'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/gdk-pixbuf-2.44.5-h2b0a6b4_1.conda
   sha256: b2a6fb56b8f2d576a3ae5e6c57b2dbab91d52d1f1658bf1b258747ae25bb9fde

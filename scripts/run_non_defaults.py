@@ -15,7 +15,7 @@ from pathlib import Path
 
 import BioSimSpace as BSS
 
-from gbsa_pipeline.change_defaults import GromacsCustom
+from gbsa_pipeline.change_defaults import GromacsCustom, GromacsParams
 
 logger = logging.getLogger(__name__)
 
@@ -37,18 +37,17 @@ def main() -> None:
 
     logger.info("Read System")
 
-    default_cfg = repo / "data" / "GROMACS_default" / "default.config"
+    # Build protocol from params only
+    params = GromacsParams(
+        integrator="md",
+        dt=0.001,
+        nsteps=100,
+        nstlog=500,
+        nstenergy=500,
+        nstxout_compressed=500,
+    )
 
-    # Build protocol from defaults and override parameters in code
-    prot = GromacsCustom(default_cfg)
-
-    # --- Run control (examples) ---
-    prot.set_integrator("md")
-    prot.set_dt(0.001)
-    prot.set_nsteps(100)
-    prot.set_nstlog(500)
-    prot.set_nstenergy(500)
-    prot.set_nstxout_compressed(500)
+    prot = GromacsCustom(params=params)
 
     # Run process
     logger.info("Starting GROMACS process")
