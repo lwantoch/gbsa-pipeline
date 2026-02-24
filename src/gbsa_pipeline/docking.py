@@ -8,32 +8,55 @@ from subprocess import CompletedProcess, run
 from typing import TYPE_CHECKING, Any, Protocol
 
 from meeko import MoleculePreparation, PDBQTWriterLegacy
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from rdkit import Chem
 from rdkit.Chem.rdDistGeom import EmbedMolecule
 from rdkit.Chem.rdForceFieldHelpers import UFFOptimizeMolecule
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
 
-@dataclass(frozen=True)
-class DockingBox:
+class DockingBox(BaseModel):
     """Defines the docking box center and size."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     center: tuple[float, float, float]
     size: tuple[float, float, float]
 
 
-@dataclass(frozen=True)
-class DockingRequest:
+class DockingRequest(BaseModel):
     """Normalized docking request for an engine run."""
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     receptor: Path
-    ligands: Sequence[Path]
+    ligands: list[Path]
     box: DockingBox
     seed: int | None = None
     workdir: Path | None = None
-    parameters: Mapping[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("receptor")
+    @classmethod
+    def _check_receptor_exists(cls, path: Path) -> Path:
+        if not path.exists():
+            raise ValueError(f"Receptor file does not exist: {path}")
+        return path
+
+    @field_validator("ligands")
+    @classmethod
+    def _check_ligands(cls, ligands: list[Path]) -> list[Path]:
+        if not ligands:
+            raise ValueError("At least one ligand file must be provided")
+
+        missing = [path for path in ligands if not path.exists()]
+        if missing:
+            missing_list = ", ".join(str(p) for p in missing)
+            raise ValueError(f"Ligand files do not exist: {missing_list}")
+
+        return ligands
 
 
 @dataclass(frozen=True)

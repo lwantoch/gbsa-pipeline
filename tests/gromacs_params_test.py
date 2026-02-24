@@ -65,30 +65,11 @@ def test_params_non_integral_float_errors() -> None:
         GromacsParams(nsteps=cast("Any", 5.5))
 
 
-def test_gromacs_custom_initialises_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    class DummyProtocol:
-        def __init__(self, config: str | None = None) -> None:
-            if config is None:
-                self._config = []
-            else:
-                self._config = Path(config).read_text(encoding="utf-8").splitlines()
-            self._parameters: dict[str, Any] = {}
-
-        def setConfig(self, config: list[str]) -> None:  # noqa: N802
-            self._config = list(config)
-
-        def getConfig(self) -> list[str]:  # noqa: N802
-            return list(self._config)
-
-    monkeypatch.setattr(
-        "gbsa_pipeline.change_defaults.BSS.Protocol.Custom",
-        DummyProtocol,
-    )
-
+def test_gromacs_custom_initialises_defaults() -> None:
     proto = GromacsCustom()
 
     assert proto._parameters["nsteps"] == 500
-    assert any("nsteps" in line and "500" in line for line in proto._config)
+    assert any("nsteps" in line and "500" in line for line in proto.getConfig())
 
 
 def test_run_gro_custom_applies_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

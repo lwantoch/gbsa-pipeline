@@ -21,7 +21,7 @@ from gbsa_pipeline.equilibration import run_heating
 from gbsa_pipeline.ligand_preparation import ligand_converter
 from gbsa_pipeline.minimization import run_minimization
 from gbsa_pipeline.parametrization import load_and_parameterise
-from gbsa_pipeline.solvation_box import run_solvation
+from gbsa_pipeline.solvation_box import SolvationParams, WaterModel, run_solvation
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -63,8 +63,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--box-size",
         type=float,
-        default="8",
-        help="Size of solvation water box",
+        default=8.0,
+        help="Absolute box size in nanometers (ignored if --padding is set)",
+    )
+    p.add_argument(
+        "--padding",
+        type=float,
+        default=None,
+        help="Padding in nanometers around the solute (overrides --box-size if set)",
     )
     p.add_argument(
         "--min_steps",
@@ -86,7 +92,7 @@ def main(argv: list[str] | None = None) -> None:
     # Calculating ligand parameter and adding protein forcefield
     parametrized_complex = load_and_parameterise(
         protein_pdb=args.protein_pdb,
-        ligand_sire=bss_ligand,
+        ligand=bss_ligand,
         protein_ff=args.protein_ff,
         ligand_net_charge=args.ligand_net_charge,
         ligand_charge_method=args.ligand_charge_method,
@@ -98,10 +104,15 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.info("Parametrized the complex!")
 
+    solvation_params = SolvationParams(
+        water_model=WaterModel(args.water_mod.lower()),
+        box_size=float(args.box_size) if args.box_size is not None else None,
+        padding=args.padding,
+    )
+
     solvated_box = run_solvation(
         system=parametrized_complex.system,
-        water_model=args.water_mod,
-        box_size=args.box_size,
+        params=solvation_params,
     )
 
     logging.info("Solvation Done!")

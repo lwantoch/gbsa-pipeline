@@ -93,7 +93,7 @@ class ParametrisedComplex:
 
 def load_and_parameterise(
     protein_pdb: PathLike,
-    ligand_sire: BSS._SireWrappers.Molecule,
+    ligand: PathLike | BSS._SireWrappers.Molecule,
     *,
     protein_ff: str = "ff14SB",
     ligand_net_charge: int | None = None,
@@ -102,7 +102,12 @@ def load_and_parameterise(
 ) -> ParametrisedComplex:
     """Convenience function: load protein + ligand, parameterise both, return combined System."""
     protein = load_protein_pdb(protein_pdb)
-    ligand = ligand_sire
+    if isinstance(ligand, (str, Path)):
+        ligand_system = BSS.IO.readMolecules(str(ligand))
+        lig_mols = ligand_system.getMolecules()
+        if not lig_mols:
+            raise ValueError(f"No molecules found in {ligand}")
+        ligand = lig_mols[0]
 
     p_protein = parameterise_protein_amber(protein, ff=protein_ff, work_dir=work_dir)
     p_ligand = parameterise_ligand_gaff2(
@@ -118,3 +123,17 @@ def load_and_parameterise(
         ligand=p_ligand,
         system=system,
     )
+
+
+def export_gromacs_top_gro(
+    system: BSS._SireWrappers.System,
+    prefix: str,
+) -> list[Path]:
+    """Export GROMACS .gro and .top files for the given system."""
+    out_gro = Path(f"{prefix}.gro")
+    out_top = Path(f"{prefix}.top")
+
+    BSS.IO.saveMolecules(str(out_gro), system, fileformat="GRO")
+    BSS.IO.saveMolecules(str(out_top), system, fileformat="TOP")
+
+    return [out_gro, out_top]

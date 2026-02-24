@@ -29,7 +29,7 @@ def test_hydrogens_added() -> None:
 
 def test_read_empty() -> None:
     """Checking the strange case of giving an empty file."""
-    with pytest.raises(OSError):
+    with pytest.raises(FileNotFoundError):
         load_ligand_sdf("tests/testdata/empty.sdf.sdf")
 
 

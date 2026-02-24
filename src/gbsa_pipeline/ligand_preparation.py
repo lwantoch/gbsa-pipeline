@@ -16,7 +16,7 @@ def load_ligand_sdf(sdf_path: PathLike | str) -> Chem.Mol:
     """
     path = Path(sdf_path)
     if not path.exists():
-        raise OSError(f"File not found: {sdf_path}")
+        raise FileNotFoundError(f"File not found: {sdf_path}")
 
     molecule_list = Chem.SDMolSupplier(str(sdf_path), removeHs=False)
 

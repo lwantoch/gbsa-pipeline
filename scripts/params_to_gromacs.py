@@ -15,10 +15,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from gbsa_pipeline.parametrization import (
-    export_gromacs_top_gro,
-    load_and_parameterise,
-)
+from gbsa_pipeline.parametrization import export_gromacs_top_gro, load_and_parameterise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
 
     complex_ = load_and_parameterise(
         protein_pdb=args.protein_pdb,
-        ligand_sdf=args.ligand_sdf,
+        ligand=args.ligand_sdf,
         protein_ff=args.protein_ff,
         ligand_net_charge=args.ligand_net_charge,
         ligand_charge_method=args.ligand_charge_method,
