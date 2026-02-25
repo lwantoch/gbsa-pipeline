@@ -4,12 +4,12 @@ from collections.abc import Sequence
 from io import TextIOWrapper
 from pathlib import Path
 
-import BioSimSpace as BSS
+import sire
 import sire.system
 
 
 def write_index_from_system(
-    system: BSS._SireWrappers.System,
+    system: sire.system.System,
     protein: sire.mol.Molecule,
     ligand: sire.mol.Molecule,
     index_file: Path,

@@ -82,6 +82,7 @@ biosimspace = ">=2025.3.0,<2026"
 pixi-pycharm = ">=0.0.10,<0.0.11"
 ambertools = ">=24.8,<25"
 gromacs = ">=2025.4,<2026"
+openmmforcefields = ">=0.15.1,<0.16"
 
 [tool.pixi.pypi-dependencies]
 gbsa-pipeline = { path = ".", editable = true }
@@ -91,7 +92,6 @@ default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
 
 [tool.pixi.tasks]
-pytest = "pytest"
 ruff = "ruff check --config config/ruff.toml ."
 ruff-fix = "ruff check --config config/ruff.toml --fix ."
 mypy = "mypy --config-file config/mypy.ini -p gbsa_pipeline -p tests"
