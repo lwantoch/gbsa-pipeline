@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import pickle
+from pathlib import Path
 from typing import Any, cast
 
 import BioSimSpace as BSS
+import parmed as pmd
 import pytest
 
-from gbsa_pipeline.parametrization import load_protein_pdb, parameterise_protein_amber
+from gbsa_pipeline.parametrization import (
+    export_gromacs_top_gro,
+    load_protein_pdb,
+    parameterise_protein_amber,
+)
 from gbsa_pipeline.solvation_box import (
     BoxShape,
     SolvationParams,
@@ -13,6 +20,7 @@ from gbsa_pipeline.solvation_box import (
     box_parameters,
     run_solvation,
 )
+from gbsa_pipeline.solvation_openmm import solvate_openmm
 
 
 @pytest.mark.integration
@@ -30,7 +38,9 @@ def test_solvation() -> None:
     # Solvate (assumed in-place)
     solvated = run_solvation(
         system=system,
-        params=SolvationParams(water_model=WaterModel.TIP3P, box_size=8, ion_concentration=0.0),
+        params=SolvationParams(
+            water_model=WaterModel.TIP3P, box_size=8, ion_concentration=0.0
+        ),
     )
 
     # Check that solvent was added
@@ -88,7 +98,9 @@ def test_run_solvation_box_vs_shell(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Box-size path
     params_box = SolvationParams(box_size=5.0, water_model=WaterModel.SPC)
-    out_box = run_solvation(system=cast("BSS._SireWrappers.System", object()), params=params_box)
+    out_box = run_solvation(
+        system=cast("BSS._SireWrappers.System", object()), params=params_box
+    )
 
     assert out_box == "solvated"
     assert captured["model"] == WaterModel.SPC.value
@@ -98,8 +110,12 @@ def test_run_solvation_box_vs_shell(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Shell path overrides box
     captured.clear()
-    params_shell = SolvationParams(padding=1.0, box_size=8.0, water_model=WaterModel.TIP4P)
-    out_shell = run_solvation(system=cast("BSS._SireWrappers.System", object()), params=params_shell)
+    params_shell = SolvationParams(
+        padding=1.0, box_size=8.0, water_model=WaterModel.TIP4P
+    )
+    out_shell = run_solvation(
+        system=cast("BSS._SireWrappers.System", object()), params=params_shell
+    )
 
     assert out_shell == "solvated"
     assert captured["model"] == WaterModel.TIP4P.value
@@ -116,3 +132,65 @@ def test_water_model_validation() -> None:
 def test_box_parameters_validation() -> None:
     with pytest.raises(ValueError):
         box_parameters(5.0, shape="invalid")
+
+
+WATER_RESNAMES = {"SOL", "WAT", "HOH", "TIP3", "TIP3P"}
+
+
+@pytest.mark.integration
+def test_openmm_preparametrized(tmp_path: Path) -> None:
+    testdata = (
+        Path(__file__).resolve().parent / "testdata" / "solvation" / "complex.pickle"
+    )
+    with testdata.open("rb") as f:
+        complex_obj = pickle.load(f)
+
+    out_gro = tmp_path / "solvated.gro"
+    out_top = tmp_path / "solvated.top"
+
+    solvated = solvate_openmm(
+        complex_obj,
+        params=SolvationParams(ion_concentration=0.15, neutralize=True),
+        output_gro=out_gro,
+        output_top=out_top,
+    )
+
+    # pic = rass / "solvated.pickle"
+    # with pic.open(mode="wb") as f:
+    #    pickle.dump(solvated, f)
+
+    assert solvated is not None
+    assert out_gro.exists()
+    assert out_top.exists()
+
+    structure = pmd.load_file(str(out_top), xyz=str(out_gro))
+
+    water_residues = [res for res in structure.residues if res.name in WATER_RESNAMES]
+
+    assert len(water_residues) > 0, "No water molecules found in solvated system"
+
+
+def test_bss_solvation() -> None:
+    testdata = Path(__file__).resolve().parent / "testdata" / "solvation"
+
+@pytest.mark.integration
+    system = BSS.IO.readMolecules([str(testdata / "complex.gro"), str(testdata / "complex.top")])
+    n_atoms_before = system.nAtoms()
+
+    system = BSS.IO.readMolecules(
+        [str(testdata / "complex.gro"), str(testdata / "complex.top")]
+    )
+        system=system,
+        params=SolvationParams(
+            water_model=WaterModel.TIP3P,
+            padding=2,
+            ion_concentration=0.1,
+            neutralize=False,
+        ),
+    )
+
+    export_gromacs_top_gro(solvated, "tests/testdata/minimization/solvated")
+
+    # Check that solvent was added
+    assert solvated.nAtoms() > n_atoms_before
+    assert solvated.charge() == 0

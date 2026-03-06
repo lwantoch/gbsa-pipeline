@@ -60,7 +60,7 @@ def test_solvation_real_protein_box_and_ions(tmp_path: pytest.TempPathFactory) -
         water_model=WaterModel.TIP3P,
         padding=1.5,
         ion_concentration=0.1,
-        is_neutral=True,
+        neutralize=True,
     )
 
     solvated = run_solvation(system=system, params=params)
@@ -95,7 +95,7 @@ def test_solvation_real_protein_without_neutralisation(
         water_model=WaterModel.TIP3P,
         padding=1.0,
         ion_concentration=0.0,
-        is_neutral=False,
+        neutralize=False,
     )
 
     solvated = run_solvation(system=system, params=params)
