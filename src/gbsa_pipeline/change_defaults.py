@@ -6,7 +6,10 @@ import logging
 from collections.abc import Mapping
 from enum import Enum
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import BioSimSpace as BSS
 from pydantic import BaseModel, ConfigDict
@@ -196,6 +199,7 @@ def run_gro_custom(
     system: BSS._SireWrappers.System,
     changes: Mapping[str, Any] | None = None,
     params: Mapping[str, Any] | GromacsParams | None = None,
+    work_dir: Path | None = None,
 ) -> tuple[BSS._SireWrappers.System, BSS.Protocol]:
     """Create protocol from params only, run GROMACS, return (system, protocol)."""
     base_params = (
@@ -218,7 +222,8 @@ def run_gro_custom(
         logger.info("Applied %d mdp overrides from mapping.", len(changes))
 
     logger.info("Starting GROMACS process.")
-    process = BSS.Process.Gromacs(system, protocol=custom_protocol)
+    kwargs = {"work_dir": str(work_dir)} if work_dir else {}
+    process = BSS.Process.Gromacs(system, protocol=custom_protocol, **kwargs)
     process.start()
     process.wait()
     logger.info("Process finished.")

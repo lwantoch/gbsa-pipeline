@@ -109,21 +109,25 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
         config.minimization.nsteps,
         config.minimization.emtol,
     )
+    min_dir = output_dir / "03_minimized"
+    min_dir.mkdir(parents=True, exist_ok=True)
     system = _run_stage(
         "minimization",
-        lambda: run_minimization(nsteps=config.minimization.nsteps, system=system),
+        lambda: run_minimization(nsteps=config.minimization.nsteps, system=system, work_dir=min_dir),
     )
     logger.info("  Done. Saving …")
-    export_gromacs_top_gro(system, str(output_dir / "03_minimized" / "minimized"))
+    export_gromacs_top_gro(system, str(min_dir / "minimized"))
     logger.info("  Saved → 03_minimized.gro / .top")
 
     # Stage 4: Equilibrate
     logger.info("─── Stage 4/5: Equilibration ───")
     logger.info("  NVT heating 0→300 K over %.1f ps", config.equilibration.simulation_time_ps)
     equil_time = config.equilibration.simulation_time_ps * BSS.Units.Time.picosecond
-    system = _run_stage("equilibration", lambda: run_heating(equil_time, system))
+    equil_dir = output_dir / "04_equilibrated"
+    equil_dir.mkdir(parents=True, exist_ok=True)
+    system = _run_stage("equilibration", lambda: run_heating(equil_time, system, work_dir=equil_dir))
     logger.info("  Done. Saving …")
-    export_gromacs_top_gro(system, str(output_dir / "04_equilibrated" / "equilibrated"))
+    export_gromacs_top_gro(system, str(equil_dir / "equilibrated"))
     logger.info("  Saved → 04_equilibrated.gro / .top")
 
     # Stage 5: Production MD
@@ -136,9 +140,13 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
         config.md.tcoupl,
         config.md.pcoupl,
     )
-    system, _ = _run_stage("production_md", lambda: run_gro_custom(parameters=config.md, system=system))
+    prod_dir = output_dir / "05_production"
+    prod_dir.mkdir(parents=True, exist_ok=True)
+    system, _ = _run_stage(
+        "production_md", lambda: run_gro_custom(parameters=config.md, system=system, work_dir=prod_dir)
+    )
     logger.info("  Done. Saving …")
-    export_gromacs_top_gro(system, str(output_dir / "05_production" / "production"))
+    export_gromacs_top_gro(system, str(prod_dir / "production"))
     logger.info("  Saved → 05_production.gro / .top")
 
     logger.info("Pipeline complete. Output written to %s", output_dir)
