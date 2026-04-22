@@ -1029,6 +1029,28 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#gbsa_pipeline.build_amber_ff_xml--returns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Returns:
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gbsa_pipeline.build_amber_ff_xml--raises" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Raises:
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1051,6 +1073,17 @@
     <span class="md-ellipsis">
       
         Parameters
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gbsa_pipeline.load_amber_complex--returns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Returns:
       
     </span>
   </a>
@@ -1700,6 +1733,28 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#gbsa_pipeline.build_amber_ff_xml--returns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Returns:
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gbsa_pipeline.build_amber_ff_xml--raises" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Raises:
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1722,6 +1777,17 @@
     <span class="md-ellipsis">
       
         Parameters
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gbsa_pipeline.load_amber_complex--returns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Returns:
       
     </span>
   </a>
@@ -1953,7 +2019,7 @@
           <b><code><span title="gbsa_pipeline.docking">docking</span></code></b>
           –
           <div class="doc-md-description">
-            <p>Lightweight docking adapter layer for Vina and helpers.</p>
+            <p>Docking helpers for preparing ligands and running AutoDock Vina.</p>
           </div>
         </li>
         <li class="doc-section-item field-body">
@@ -2188,15 +2254,15 @@ Pass the output path to
     custom bond, angle, dihedral, and LJ parameters.
 residue_mol2s:
     Mol2 files for non-standard residues (e.g. metal-coordinating CYS/HIS
-    modified by MCPB.py, bare metal ions).  Each file must contain exactly
+    modified by MCPB.py, bare metal ions). Each file must contain exactly
     one <code>@&lt;TRIPOS&gt;MOLECULE</code> block.
 protein_ff:
-    Protein force field.  Determines which base AMBER parameter files are
+    Protein force field. Determines which base AMBER parameter files are
     loaded (<code>parm19.dat + frcmod.ff14SB</code> for FF14SB, etc.).
 ligand_ff:
-    Ligand force field.  Determines <code>gaff.dat</code> vs <code>gaff2.dat</code>.
+    Ligand force field. Determines <code>gaff.dat</code> vs <code>gaff2.dat</code>.
 output_xml:
-    Path where the unified XML is written.  A file inside a temporary
+    Path where the unified XML is written. A file inside a temporary
     directory is used when <code>None</code>.</p>
 
           <backlinks identifier="gbsa_pipeline.AmberFFInput" handler="python" />
@@ -2259,8 +2325,8 @@ output_xml:
 inpcrd:
     AMBER coordinate file (<code>.inpcrd</code> / <code>.rst7</code>).
 output_dir:
-    Directory for GROMACS output files.  A temporary directory is
-    created when <code>None</code>.</p>
+    Directory for GROMACS output files. A temporary directory is created
+    when <code>None</code>.</p>
 
           <backlinks identifier="gbsa_pipeline.AmberInput" handler="python" />
 
@@ -3101,46 +3167,21 @@ file that OpenMM's <code>ForceField</code> can read.</p>
 <h4 id="gbsa_pipeline.build_amber_ff_xml--parameters">Parameters<a class="headerlink" href="#gbsa_pipeline.build_amber_ff_xml--parameters" title="Permanent link">&para;</a></h4>
 <p>inp:
     Validated inputs.</p>
-
-
-<p><span class="doc-section-title">Returns:</span></p>
-    <ul>
-        <li class="doc-section-item field-body">
-              <code><a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a></code>
-          –
-          <div class="doc-md-description">
-            <p>Path to the written XML file.</p>
-          </div>
-        </li>
-    </ul>
-
-
-<p><span class="doc-section-title">Raises:</span></p>
-    <ul>
-        <li class="doc-section-item field-body">
-              <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError">RuntimeError</a></code>
-            –
-          <div class="doc-md-description">
-            <p>If the AMBER parameter directory cannot be found.</p>
-          </div>
-        </li>
-        <li class="doc-section-item field-body">
-              <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/exceptions.html#ValueError">ValueError</a></code>
-            –
-          <div class="doc-md-description">
-            <p>If any atom type referenced in a residue template is not
-defined in the combined parameter set.</p>
-          </div>
-        </li>
-    </ul>
+<h4 id="gbsa_pipeline.build_amber_ff_xml--returns">Returns:<a class="headerlink" href="#gbsa_pipeline.build_amber_ff_xml--returns" title="Permanent link">&para;</a></h4>
+<p>Path
+    Path to the written XML file.</p>
+<h4 id="gbsa_pipeline.build_amber_ff_xml--raises">Raises:<a class="headerlink" href="#gbsa_pipeline.build_amber_ff_xml--raises" title="Permanent link">&para;</a></h4>
+<p>RuntimeError
+    If the AMBER parameter directory cannot be found.
+ValueError
+    If any atom type referenced in a residue template is not defined in
+    the combined parameter set.</p>
 
           <backlinks identifier="gbsa_pipeline.build_amber_ff_xml" handler="python" />
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/gbsa_pipeline/frcmod_parametrization.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">119</span>
-<span class="normal">120</span>
-<span class="normal">121</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">121</span>
 <span class="normal">122</span>
 <span class="normal">123</span>
 <span class="normal">124</span>
@@ -3198,7 +3239,10 @@ defined in the combined parameter set.</p>
 <span class="normal">176</span>
 <span class="normal">177</span>
 <span class="normal">178</span>
-<span class="normal">179</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">build_amber_ff_xml</span><span class="p">(</span><span class="n">inp</span><span class="p">:</span> <span class="n">AmberFFInput</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="normal">179</span>
+<span class="normal">180</span>
+<span class="normal">181</span>
+<span class="normal">182</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">build_amber_ff_xml</span><span class="p">(</span><span class="n">inp</span><span class="p">:</span> <span class="n">AmberFFInput</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Build a unified OpenMM ForceField XML from AMBER frcmod and mol2 files.</span>
 
 <span class="sd">    Loads the base AMBER parameter files for the requested force fields, adds</span>
@@ -3212,27 +3256,29 @@ defined in the combined parameter set.</p>
 <span class="sd">        Validated inputs.</span>
 
 <span class="sd">    Returns:</span>
+<span class="sd">    -------</span>
+<span class="sd">    Path</span>
 <span class="sd">        Path to the written XML file.</span>
 
 <span class="sd">    Raises:</span>
-<span class="sd">        RuntimeError: If the AMBER parameter directory cannot be found.</span>
-<span class="sd">        ValueError: If any atom type referenced in a residue template is not</span>
-<span class="sd">            defined in the combined parameter set.</span>
+<span class="sd">    ------</span>
+<span class="sd">    RuntimeError</span>
+<span class="sd">        If the AMBER parameter directory cannot be found.</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        If any atom type referenced in a residue template is not defined in</span>
+<span class="sd">        the combined parameter set.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">parm_dir</span> <span class="o">=</span> <span class="n">_find_amber_parm_dir</span><span class="p">()</span>
 
-    <span class="c1"># Base AMBER parameter files for the chosen force fields.</span>
     <span class="n">base_files</span> <span class="o">=</span> <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">parm_dir</span> <span class="o">/</span> <span class="n">f</span><span class="p">)</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">_PROTEIN_BASE_PARAMS</span><span class="p">[</span><span class="n">inp</span><span class="o">.</span><span class="n">protein_ff</span><span class="p">]]</span>
     <span class="n">base_files</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">parm_dir</span> <span class="o">/</span> <span class="n">_LIGAND_BASE_PARAMS</span><span class="p">[</span><span class="n">inp</span><span class="o">.</span><span class="n">ligand_ff</span><span class="p">]))</span>
 
-    <span class="c1"># Load base params + user frcmod files into a single AmberParameterSet.</span>
     <span class="n">amber_parm</span> <span class="o">=</span> <span class="n">pmd</span><span class="o">.</span><span class="n">amber</span><span class="o">.</span><span class="n">AmberParameterSet</span><span class="p">(</span>
         <span class="o">*</span><span class="n">base_files</span><span class="p">,</span>
         <span class="o">*</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">)</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">inp</span><span class="o">.</span><span class="n">frcmod_files</span><span class="p">),</span>
     <span class="p">)</span>
     <span class="n">ff</span> <span class="o">=</span> <span class="n">pmd</span><span class="o">.</span><span class="n">openmm</span><span class="o">.</span><span class="n">OpenMMParameterSet</span><span class="o">.</span><span class="n">from_parameterset</span><span class="p">(</span><span class="n">amber_parm</span><span class="p">)</span>
 
-    <span class="c1"># Merge mol2 residue templates directly into the parameter set.</span>
     <span class="k">for</span> <span class="n">mol2_path</span> <span class="ow">in</span> <span class="n">inp</span><span class="o">.</span><span class="n">residue_mol2s</span><span class="p">:</span>
         <span class="n">mol2</span> <span class="o">=</span> <span class="n">pmd</span><span class="o">.</span><span class="n">load_file</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">mol2_path</span><span class="p">))</span>
         <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">mol2</span><span class="p">,</span> <span class="n">pmd</span><span class="o">.</span><span class="n">modeller</span><span class="o">.</span><span class="n">ResidueTemplateContainer</span><span class="p">):</span>
@@ -3240,13 +3286,13 @@ defined in the combined parameter set.</p>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">ff</span><span class="o">.</span><span class="n">residues</span><span class="p">[</span><span class="n">mol2</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">mol2</span>
 
-    <span class="c1"># Validate: all types used in templates must be defined.</span>
     <span class="n">defined</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">ff</span><span class="o">.</span><span class="n">atom_types</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span>
     <span class="n">used</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
     <span class="k">for</span> <span class="n">templ</span> <span class="ow">in</span> <span class="n">ff</span><span class="o">.</span><span class="n">residues</span><span class="o">.</span><span class="n">values</span><span class="p">():</span>
         <span class="k">for</span> <span class="n">atom</span> <span class="ow">in</span> <span class="n">templ</span><span class="o">.</span><span class="n">atoms</span><span class="p">:</span>
             <span class="k">if</span> <span class="n">at</span> <span class="o">:=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">atom</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">):</span>
                 <span class="n">used</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">at</span><span class="p">))</span>
+
     <span class="n">missing</span> <span class="o">=</span> <span class="n">used</span> <span class="o">-</span> <span class="n">defined</span>
     <span class="k">if</span> <span class="n">missing</span><span class="p">:</span>
         <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
@@ -3255,8 +3301,7 @@ defined in the combined parameter set.</p>
             <span class="sa">f</span><span class="s2">&quot;Add a frcmod file that defines these types.&quot;</span>
         <span class="p">)</span>
 
-    <span class="c1"># Write unified XML.</span>
-    <span class="n">output_xml</span> <span class="o">=</span> <span class="n">inp</span><span class="o">.</span><span class="n">output_xml</span> <span class="ow">or</span> <span class="n">Path</span><span class="p">(</span><span class="n">tempfile</span><span class="o">.</span><span class="n">mkdtemp</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="s2">&quot;gbsa_ff_&quot;</span><span class="p">))</span> <span class="o">/</span> <span class="s2">&quot;combined.xml&quot;</span>
+    <span class="n">output_xml</span> <span class="o">=</span> <span class="n">inp</span><span class="o">.</span><span class="n">output_xml</span> <span class="ow">or</span> <span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="n">tempfile</span><span class="o">.</span><span class="n">mkdtemp</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="s2">&quot;gbsa_ff_&quot;</span><span class="p">))</span> <span class="o">/</span> <span class="s2">&quot;combined.xml&quot;</span><span class="p">)</span>
     <span class="n">ff</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">output_xml</span><span class="p">),</span> <span class="n">write_unused</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
     <span class="k">return</span> <span class="n">output_xml</span>
 </code></pre></div></td></tr></table></div>
@@ -3288,44 +3333,15 @@ defined in the combined parameter set.</p>
 <h4 id="gbsa_pipeline.load_amber_complex--parameters">Parameters<a class="headerlink" href="#gbsa_pipeline.load_amber_complex--parameters" title="Permanent link">&para;</a></h4>
 <p>inp:
     Validated inputs.</p>
-
-
-<p><span class="doc-section-title">Returns:</span></p>
-    <ul>
-        <li class="doc-section-item field-body">
-              <code><a class="autorefs autorefs-internal" title="&lt;code class=&quot;doc-symbol doc-symbol-heading doc-symbol-class&quot;&gt;&lt;/code&gt;            &lt;span class=&quot;doc doc-object-name doc-class-name&quot;&gt;ParametrisedComplex&lt;/span&gt;
-
-
-  &lt;span class=&quot;doc doc-labels&quot;&gt;
-      &lt;small class=&quot;doc doc-label doc-label-dataclass&quot;&gt;&lt;code&gt;dataclass&lt;/code&gt;&lt;/small&gt;
-  &lt;/span&gt;" href="./#gbsa_pipeline.ParametrisedComplex">ParametrisedComplex</a></code>
-          –
-          <div class="doc-md-description">
-            <p>class:<code>~gbsa_pipeline.parametrization.ParametrisedComplex</code> with</p>
-          </div>
-        </li>
-        <li class="doc-section-item field-body">
-              <code><a class="autorefs autorefs-internal" title="&lt;code class=&quot;doc-symbol doc-symbol-heading doc-symbol-class&quot;&gt;&lt;/code&gt;            &lt;span class=&quot;doc doc-object-name doc-class-name&quot;&gt;ParametrisedComplex&lt;/span&gt;
-
-
-  &lt;span class=&quot;doc doc-labels&quot;&gt;
-      &lt;small class=&quot;doc doc-label doc-label-dataclass&quot;&gt;&lt;code&gt;dataclass&lt;/code&gt;&lt;/small&gt;
-  &lt;/span&gt;" href="./#gbsa_pipeline.ParametrisedComplex">ParametrisedComplex</a></code>
-          –
-          <div class="doc-md-description">
-            <p>paths to the GROMACS coordinate and topology files.</p>
-          </div>
-        </li>
-    </ul>
+<h4 id="gbsa_pipeline.load_amber_complex--returns">Returns:<a class="headerlink" href="#gbsa_pipeline.load_amber_complex--returns" title="Permanent link">&para;</a></h4>
+<p>ParametrisedComplex
+    Object with paths to the GROMACS coordinate and topology files.</p>
 
           <backlinks identifier="gbsa_pipeline.load_amber_complex" handler="python" />
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/gbsa_pipeline/frcmod_parametrization.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">209</span>
-<span class="normal">210</span>
-<span class="normal">211</span>
-<span class="normal">212</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">212</span>
 <span class="normal">213</span>
 <span class="normal">214</span>
 <span class="normal">215</span>
@@ -3350,7 +3366,11 @@ defined in the combined parameter set.</p>
 <span class="normal">234</span>
 <span class="normal">235</span>
 <span class="normal">236</span>
-<span class="normal">237</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">load_amber_complex</span><span class="p">(</span><span class="n">inp</span><span class="p">:</span> <span class="n">AmberInput</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ParametrisedComplex</span><span class="p">:</span>
+<span class="normal">237</span>
+<span class="normal">238</span>
+<span class="normal">239</span>
+<span class="normal">240</span>
+<span class="normal">241</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">load_amber_complex</span><span class="p">(</span><span class="n">inp</span><span class="p">:</span> <span class="n">AmberInput</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ParametrisedComplex</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Load an AMBER prmtop + inpcrd and export to GROMACS ``.gro`` / ``.top``.</span>
 
 <span class="sd">    Uses ParmEd to read the AMBER files directly and write the GROMACS files.</span>
@@ -3361,8 +3381,9 @@ defined in the combined parameter set.</p>
 <span class="sd">        Validated inputs.</span>
 
 <span class="sd">    Returns:</span>
-<span class="sd">        :class:`~gbsa_pipeline.parametrization.ParametrisedComplex` with</span>
-<span class="sd">        paths to the GROMACS coordinate and topology files.</span>
+<span class="sd">    -------</span>
+<span class="sd">    ParametrisedComplex</span>
+<span class="sd">        Object with paths to the GROMACS coordinate and topology files.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">work_dir</span> <span class="o">=</span> <span class="n">inp</span><span class="o">.</span><span class="n">output_dir</span> <span class="ow">or</span> <span class="n">Path</span><span class="p">(</span><span class="n">tempfile</span><span class="o">.</span><span class="n">mkdtemp</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="s2">&quot;gbsa_amber_&quot;</span><span class="p">))</span>
     <span class="n">work_dir</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
