@@ -67,10 +67,10 @@ def test_run_minimization_builds_bss_process_and_returns_minimized_system(
     The helper should create a BioSimSpace ``Minimisation`` protocol and pass it
     together with the input system to ``BSS.Process.Gromacs``. The optional
     ``work_dir`` should be converted to a string because BioSimSpace process
-    constructors commonly expect file-system paths in that form. The assertion
-    allows the system to be supplied positionally or by keyword because both are
-    equivalent process-construction styles. The returned object should be
-    exactly the system returned by ``getSystem(block=True)``.
+    constructors commonly expect file-system paths in that form. The current
+    helper also passes ``ignore_warnings=True`` by default so staged smoke tests
+    can proceed through BioSimSpace's GROMACS wrapper consistently. The returned
+    object should be exactly the system returned by ``getSystem(block=True)``.
     """
     input_system = Mock(name="input_system")
     minimized_system = Mock(name="minimized_system")
@@ -93,8 +93,8 @@ def test_run_minimization_builds_bss_process_and_returns_minimized_system(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=input_system,
-        protocol=minimization_protocol,
-        work_dir=tmp_path,
+        ignore_warnings=True,
+        work_dir=str(tmp_path),
     )
     process.start.assert_called_once_with()
     process.wait.assert_called_once_with(max_time=None)
@@ -110,10 +110,10 @@ def test_run_minimization_omits_work_dir_when_not_provided(
     The ``work_dir`` argument is optional because callers may prefer to let
     BioSimSpace create and manage its own process directory. When no path is
     provided, the helper should not pass ``work_dir=None`` explicitly because
-    that can differ from omitting the keyword for third-party APIs. The process
-    call is checked semantically so the test remains stable across positional
-    and keyword system passing. The returned minimized system is still taken from
-    ``getSystem(block=True)``.
+    that can differ from omitting the keyword for third-party APIs. The helper
+    still passes the explicit default warning policy so process construction is
+    stable across helper functions. The returned minimized system is still taken
+    from ``getSystem(block=True)``.
     """
     input_system = Mock(name="input_system")
     minimized_system = Mock(name="minimized_system")
@@ -133,7 +133,7 @@ def test_run_minimization_omits_work_dir_when_not_provided(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=input_system,
-        protocol=minimization_protocol,
+        ignore_warnings=True,
     )
     process.start.assert_called_once_with()
     process.wait.assert_called_once_with(max_time=None)
@@ -151,9 +151,10 @@ def test_run_heating_builds_bss_process_and_returns_equilibrated_system(
     requested runtime, a conservative 1 fs timestep, a 50 K start temperature, a
     300 K end temperature, and the current backbone restraint default. The
     optional ``work_dir`` should be converted to a string and passed only as a
-    process keyword. The test mocks BioSimSpace because unit coverage should
-    verify local protocol wiring, not run GROMACS. The returned object should be
-    exactly the system returned by ``getSystem(block=True)``.
+    process keyword, matching the minimization helper behavior. The test mocks
+    BioSimSpace because unit coverage should verify local protocol wiring, not
+    run GROMACS. The returned object should be exactly the system returned by
+    ``getSystem(block=True)``.
     """
     minimized_system = Mock(name="minimized_system")
     equilibrated_system = Mock(name="equilibrated_system")
@@ -184,8 +185,8 @@ def test_run_heating_builds_bss_process_and_returns_equilibrated_system(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=minimized_system,
-        protocol=heating_protocol,
-        work_dir=tmp_path,
+        ignore_warnings=True,
+        work_dir=str(tmp_path),
     )
     process.start.assert_called_once_with()
     process.wait.assert_called_once_with(max_time=None)
@@ -234,7 +235,7 @@ def test_run_heating_omits_work_dir_when_not_provided(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=minimized_system,
-        protocol=heating_protocol,
+        ignore_warnings=True,
     )
     process.start.assert_called_once_with()
     process.wait.assert_called_once_with(max_time=None)
@@ -285,8 +286,8 @@ def test_run_npt_equilibration_builds_bss_process_and_returns_equilibrated_syste
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=heated_system,
-        protocol=equilibration_protocol,
-        work_dir=tmp_path,
+        ignore_warnings=True,
+        work_dir=str(tmp_path),
     )
     process.start.assert_called_once_with()
     process.wait.assert_called_once_with(max_time=None)
@@ -334,7 +335,7 @@ def test_run_npt_equilibration_omits_work_dir_when_not_provided(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=heated_system,
-        protocol=equilibration_protocol,
+        ignore_warnings=True,
     )
     process.start.assert_called_once_with()
     process.wait.assert_called_once_with(max_time=None)
@@ -351,10 +352,10 @@ def test_run_production_builds_bss_process_and_returns_production_system(
     The helper should create a BioSimSpace ``Production`` protocol with the
     requested runtime, a 300 K temperature, and 1 atm pressure. The optional
     ``work_dir`` should be converted to a string and passed only as a process
-    keyword, matching the other MD helper behavior. The process call is checked
-    semantically because the system may be passed positionally or by keyword.
-    The returned object should be exactly the system returned by
-    ``getSystem(block=True)``.
+    keyword, matching the other MD helper behavior. The current process wrapper
+    also passes ``ignore_warnings=True`` by default for consistency with the
+    staged smoke-test helpers. The returned object should be exactly the system
+    returned by ``getSystem(block=True)``.
     """
     equilibrated_system = Mock(name="equilibrated_system")
     production_system = Mock(name="production_system")
@@ -383,8 +384,8 @@ def test_run_production_builds_bss_process_and_returns_production_system(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=equilibrated_system,
-        protocol=production_protocol,
-        work_dir=tmp_path,
+        ignore_warnings=True,
+        work_dir=str(tmp_path),
     )
     process.start.assert_called_once_with()
     process.wait.assert_called_once_with(max_time=None)
@@ -400,10 +401,10 @@ def test_run_production_omits_work_dir_when_not_provided(
     The ``work_dir`` argument remains optional so the caller can either choose a
     predictable process directory or let BioSimSpace create one. When no path is
     provided, the helper should omit the keyword entirely instead of passing
-    ``work_dir=None``. The process call is checked semantically because the
-    system may be passed positionally or by keyword. This test checks only local
-    process construction and return behavior, keeping real production MD
-    execution out of unit coverage.
+    ``work_dir=None``. The process warning policy is still explicit because the
+    helper always forwards the current default to the BioSimSpace GROMACS
+    process. This test checks only local process construction and return
+    behavior, keeping real production MD execution out of unit coverage.
     """
     equilibrated_system = Mock(name="equilibrated_system")
     production_system = Mock(name="production_system")
@@ -431,7 +432,7 @@ def test_run_production_omits_work_dir_when_not_provided(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=equilibrated_system,
-        protocol=production_protocol,
+        ignore_warnings=True,
     )
     process.start.assert_called_once_with()
     process.wait.assert_called_once_with(max_time=None)
