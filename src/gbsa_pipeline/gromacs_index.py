@@ -1,11 +1,25 @@
-"""Module to generate gromacs index files for a system."""
+"""Module to generate GROMACS index files for a Sire molecular system.
 
-from collections.abc import Sequence
-from io import TextIOWrapper
-from pathlib import Path
+This module provides a single public function, ``write_index_from_system``,
+that iterates over all molecules in a Sire system to collect 1-based atom
+indices for the receptor (protein) and ligand groups, then writes them in
+the standard GROMACS ``.ndx`` format.  The output file is intended to be
+passed to ``gmx_MMPBSA`` via the ``-ci`` flag or to standard GROMACS tools
+such as ``gmx trjconv`` and ``gmx make_ndx``.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import sire
-import sire.system
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from io import TextIOWrapper
+    from pathlib import Path
+
+    import sire.system
 
 
 def write_index_from_system(
@@ -14,7 +28,21 @@ def write_index_from_system(
     ligand: sire.mol.Molecule,
     index_file: Path,
 ) -> None:
-    """Generate GROMACS index file using BioSimSpace molecule indices."""
+    """Write a GROMACS index file with Receptor and Ligand atom groups.
+
+    The function iterates over every molecule in ``system`` in order,
+    accumulating 1-based global atom indices for the molecule matched by
+    ``protein`` and the molecule matched by ``ligand``; all other molecules
+    are counted but silently skipped.  The groups are written as
+    ``[ Receptor ]`` and ``[ Ligand ]`` sections, which are the names
+    expected by gmx_MMPBSA when the ``-cg`` flag is used with group numbers
+    0 and 1.  Raises ``RuntimeError`` if either molecule is not found in
+    the system, to fail early rather than silently produce an incomplete
+    index file.
+    See the GROMACS index file format documentation at
+    https://manual.gromacs.org/documentation/current/reference-manual/file-formats.html#ndx
+    for the format specification.
+    """
     protein_idx = system.getIndex(protein)
     ligand_idx = system.getIndex(ligand)
 
@@ -39,7 +67,7 @@ def write_index_from_system(
     if not ligand_atoms:
         raise RuntimeError("Ligand atoms not found in system.")
 
-    with open(index_file, "w") as f:
+    with index_file.open("w") as f:
         f.write("[ Receptor ]\n")
         _write_group(f, receptor_atoms)
 
@@ -48,5 +76,6 @@ def write_index_from_system(
 
 
 def _write_group(f: TextIOWrapper, atoms: Sequence[int], per_line: int = 15) -> None:
+    """Write a single index group body, 15 atom indices per line."""
     for i in range(0, len(atoms), per_line):
         f.write(" ".join(map(str, atoms[i : i + per_line])) + "\n")
