@@ -191,14 +191,10 @@ NPT_RESTRAINED_PARAMS: dict[str, Any] = {
     "constraint_algorithm": "LINCS",
     "lincs_order": 4,
     "lincs_warnangle": 90.0,  # GROMACS manual: 90° recommended for poorly-minimised/strained starting structures
-    # BSS does not pass the NVT checkpoint to the NPT process (each BSS stage writes
-    # a GRO file with coordinates only — no velocities).  Without a checkpoint or
-    # gen_vel=yes the NPT starts with zero velocities (T≈10 K), causing large pressure
-    # excursions and production crashes (observed pytest-39).  Regenerating at 300 K
-    # from the properly minimised and heated coordinates is the safest recovery.
-    "continuation": "no",
-    "gen_vel": "yes",
-    "gen_temp": 300.0,
+    # continuation and gen_vel are NOT set here: run_npt_equilibration receives
+    # checkpoint_path=nvt_restrained_dir/"gromacs.cpt", which makes md.py inject
+    # continuation=yes and gen_vel=no automatically so GROMACS reads velocities
+    # from the NVT checkpoint rather than regenerating them.
     "tcoupl": "V-rescale",
     "tc_grps": "System",
     "tau_t": 0.1,
@@ -240,11 +236,7 @@ NPT_PARAMS: dict[str, Any] = {
     "constraint_algorithm": "LINCS",
     "lincs_order": 4,
     "lincs_warnangle": 90.0,  # GROMACS manual: 90° recommended for poorly-minimised/strained starting structures
-    # Same checkpoint-gap fix as NPT restrained: BSS provides coords only; regenerate
-    # velocities at 300 K to avoid starting from T≈0 K (see NPT restrained comment).
-    "continuation": "no",
-    "gen_vel": "yes",
-    "gen_temp": 300.0,
+    # continuation and gen_vel are NOT set here: checkpoint_path handles them.
     "tcoupl": "V-rescale",
     "tc_grps": "System",
     "tau_t": 0.1,
@@ -285,10 +277,11 @@ PRODUCTION_PARAMS: dict[str, Any] = {
     "constraint_algorithm": "LINCS",
     "lincs_order": 4,
     "lincs_warnangle": 90.0,  # GROMACS manual: 90° recommended for poorly-minimised/strained starting structures
-    # Same checkpoint-gap fix: BSS provides coords only; regenerate velocities at 300 K.
-    "continuation": "no",
-    "gen_vel": "yes",
-    "gen_temp": 300.0,
+    # continuation and gen_vel are NOT set here: run_production receives
+    # checkpoint_path=npt_unrestrained_dir/"gromacs.cpt", which makes md.py inject
+    # continuation=yes and gen_vel=no so GROMACS reads velocities from the NPT
+    # checkpoint.  Observed failure without this: SETTLE crash at step 568 when
+    # gen_vel=yes drew fresh Maxwell-Boltzmann velocities onto residual bad contacts.
     "tcoupl": "V-rescale",
     "tc_grps": "System",
     "tau_t": 0.1,
@@ -302,7 +295,7 @@ PRODUCTION_PARAMS: dict[str, Any] = {
     "nstlog": 500,
     "nstenergy": 500,
     "nstcalcenergy": 100,
-    # 100 frames: at nstxout_compressed=1000 over 100k steps → 100 frames.
+    # 100 frames: 100 000 steps / nstxout_compressed=1000 = 100 frames.
     "nstxout_compressed": 1000,
 }
 
@@ -545,6 +538,9 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
         work_dir=npt_restrained_dir,
         params=NPT_RESTRAINED_PARAMS,
         restraint="backbone",
+        # Pass the NVT checkpoint so GROMACS reads velocities from it instead of
+        # regenerating them (gen_vel=yes on bad contacts → SETTLE crash at step 568).
+        checkpoint_path=nvt_restrained_dir / "gromacs.cpt",
     )
 
     assert npt_restrained is not None
@@ -556,6 +552,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
         work_dir=npt_unrestrained_dir,
         params=NPT_PARAMS,
         restraint=None,
+        checkpoint_path=npt_restrained_dir / "gromacs.cpt",
     )
 
     assert npt_unrestrained is not None
@@ -566,6 +563,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
         npt_unrestrained,
         work_dir=production_dir,
         params=PRODUCTION_PARAMS,
+        checkpoint_path=npt_unrestrained_dir / "gromacs.cpt",
     )
 
     assert production is not None

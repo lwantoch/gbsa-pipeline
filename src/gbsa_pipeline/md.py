@@ -24,9 +24,35 @@ Module-level override dicts
 ``_NPT_STABILITY_PARAMS``
     Applied to restrained NPT, unrestrained NPT, and production stages when the
     caller passes ``params=None``.  Uses a 2 fs timestep (safe with h-bonds
-    constraints) and the relaxed LINCS warning angle.  All other NPT/production
-    MDP parameters (barostat, gen-vel, thermostat coupling) are left to BSS
-    because the BSS-generated defaults proved correct during integration testing.
+    constraints) and the relaxed LINCS warning angle.  Velocity generation and
+    continuation flags are NOT included here because they are controlled by the
+    ``checkpoint_path`` mechanism in ``_run_bss_protocol``: when a checkpoint is
+    supplied, ``continuation=yes`` and ``gen_vel=no`` are injected automatically
+    so mdrun reads velocities from the checkpoint instead of regenerating them.
+
+Checkpoint continuity
+---------------------
+BSS does not carry velocities between stages.  ``process.getSystem()`` returns a
+Sire system built from the final GROMACS GRO file, which BSS writes with
+coordinates only (no velocity columns).  This means that without intervention
+every stage starts at T≈0 K (``continuation=yes, gen_vel=no``) or with freshly
+drawn Maxwell-Boltzmann velocities (``gen_vel=yes``) that can land on bad
+contacts and trigger SETTLE crashes.
+
+The correct approach is to pass the GROMACS checkpoint file (``gromacs.cpt``)
+written by each stage to the next stage via ``gmx mdrun -cpi``.  The checkpoint
+carries the exact velocity state at the end of the previous stage.  When
+``checkpoint_path`` is supplied to ``run_npt_equilibration`` or
+``run_production``, ``_run_bss_protocol`` passes it to ``BSS.Process.Gromacs``
+as ``checkpoint_file``, which makes BSS add ``-t <checkpoint>`` to the internal
+``gmx grompp`` call.  This embeds the checkpoint velocities into the TPR so
+mdrun starts with the correct velocity state without needing ``-cpi``.  Using
+``grompp -t`` instead of ``mdrun -cpi`` is essential when the integrator changes
+between stages (NVT ``sd`` to NPT ``md``): ``-cpi`` causes GROMACS to abort
+with "Cannot change integrator during a checkpoint restart".
+
+``run_heating`` does not accept a ``checkpoint_path`` because NVT heating always
+starts from a minimized structure with no prior velocities.
 """
 
 from __future__ import annotations
@@ -273,6 +299,7 @@ def _run_bss_protocol(
     ignore_warnings: bool = True,
     stage_name: str = "GROMACS stage",
     max_time: int | None = None,
+    checkpoint_path: Path | None = None,
 ) -> sire.System:
     """Run a BioSimSpace GROMACS protocol with optional MDP overrides.
 
@@ -283,16 +310,45 @@ def _run_bss_protocol(
     modified key-by-key and passed back into the process before execution. A
     failed process raises a diagnostic error with log tails instead of returning
     ``None`` to the caller.
+
+    When ``checkpoint_path`` points to a GROMACS ``.cpt`` file from the previous
+    stage, it is passed to ``BSS.Process.Gromacs`` as ``checkpoint_file``.  BSS
+    adds ``-t <checkpoint>`` to its internal ``gmx grompp`` call, which embeds
+    the checkpoint velocities directly into the TPR.  mdrun then starts with
+    those velocities without needing ``-cpi``.
+
+    This approach (``grompp -t``) is correct for cross-stage velocity continuity
+    where the integrator changes between stages (e.g. NVT ``sd`` to NPT ``md``).
+    The alternative, ``mdrun -cpi``, locks the integrator and GROMACS refuses to
+    start with "Cannot change integrator during a checkpoint restart".  The MDP
+    is overridden with ``continuation = yes`` and ``gen_vel = no`` so grompp
+    uses the checkpoint velocities rather than regenerating them.  See the module
+    docstring for the full explanation of the BSS checkpoint gap.
     """
+    # Use 1 MPI rank + all available OpenMP threads so mdrun fully uses the
+    # machine's CPU cores without spawning multiple MPI processes that would
+    # each try to own the GPU/memory bus.
+    extra_args: dict[str, str] = {"-ntmpi": "1", "-ntomp": "12"}
+
     kwargs: dict[str, object] = {
         "ignore_warnings": ignore_warnings,
-        # Use 1 MPI rank + all available OpenMP threads so mdrun fully uses the
-        # machine's CPU cores without spawning multiple MPI processes that would
-        # each try to own the GPU/memory bus.
-        "extra_args": {"-ntmpi": "1", "-ntomp": "12"},
+        "extra_args": extra_args,
     }
     if work_dir:
         kwargs["work_dir"] = str(work_dir)
+
+    # When a checkpoint is supplied, pass it to BSS as checkpoint_file so BSS
+    # adds -t <checkpoint> to its internal grompp call.  grompp embeds the
+    # checkpoint velocities directly into the TPR; mdrun then starts with those
+    # velocities without needing -cpi.
+    #
+    # This is the correct approach for cross-stage velocity continuity:
+    # -cpi (mdrun restart) locks the integrator — GROMACS refuses to switch from
+    # sd (NVT) to md (NPT) with "Cannot change integrator during a checkpoint
+    # restart".  grompp -t has no such restriction and is designed exactly for
+    # reading velocities when starting a new simulation from a previous state.
+    if checkpoint_path is not None:
+        kwargs["checkpoint_file"] = str(checkpoint_path)
 
     process = BSS.Process.Gromacs(
         protocol=protocol,
@@ -300,13 +356,24 @@ def _run_bss_protocol(
         **kwargs,
     )
 
-    # Apply MDP overrides when supplied.  None is treated as "no overrides",
-    # so each public stage function is responsible for substituting the
-    # validated module-level default before reaching this point.
+    # Apply caller-supplied MDP overrides first.  None is treated as "no
+    # overrides", so each public stage function substitutes the validated
+    # module-level default before reaching this point.
     if params is not None:
         config = _apply_gromacs_params_to_config(
             config=list(process.getConfig()),
             params=params,
+        )
+        process.setConfig(config)
+
+    # When a checkpoint is supplied, force continuation=yes and gen_vel=no
+    # AFTER any caller overrides so the checkpoint always wins.  This overrides
+    # any gen_vel=yes / continuation=no that a caller's params dict might have
+    # set, because those are wrong when velocities are available in the CPT.
+    if checkpoint_path is not None:
+        config = _apply_gromacs_params_to_config(
+            list(process.getConfig()),
+            {"continuation": "yes", "gen_vel": "no"},
         )
         process.setConfig(config)
 
@@ -424,15 +491,23 @@ def run_npt_equilibration(
     *,
     ignore_warnings: bool = True,
     max_time: int | None = None,
+    checkpoint_path: Path | None = None,
 ) -> sire.System:
     """Run a BioSimSpace/GROMACS NPT equilibration procedure.
 
     BioSimSpace creates the base NPT Equilibration protocol, including position
     restraint files when ``restraint`` is set.  When ``params`` is ``None`` the
     module-level ``_NPT_STABILITY_PARAMS`` overrides are applied: a 2 fs
-    timestep and the relaxed LINCS warning angle.  BSS-generated settings that
-    proved correct during integration testing (barostat type, vel-rescale
-    thermostat, gen-vel, continuation) are left untouched.
+    timestep and the relaxed LINCS warning angle.
+
+    When ``checkpoint_path`` is supplied it must point to the ``gromacs.cpt``
+    file written by the preceding stage (NVT for restrained NPT, restrained NPT
+    for unrestrained NPT).  The checkpoint is passed to ``gmx mdrun`` via
+    ``-cpi`` and the MDP is forced to ``continuation = yes, gen_vel = no`` so
+    that mdrun uses the checkpoint velocities rather than generating new ones.
+    This avoids the T≈0 K start (BSS drops velocities) and the SETTLE crashes
+    that can result from freshly drawn Maxwell-Boltzmann velocities landing on
+    residual bad contacts.
 
     This function is used for both restrained and unrestrained NPT; the
     ``restraint`` argument selects the appropriate topology and MDP define flag
@@ -453,6 +528,7 @@ def run_npt_equilibration(
         params=params if params is not None else _NPT_STABILITY_PARAMS,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS NPT equilibration",
+        checkpoint_path=checkpoint_path,
     )
 
 
@@ -464,15 +540,22 @@ def run_production(
     *,
     ignore_warnings: bool = True,
     max_time: int | None = None,
+    checkpoint_path: Path | None = None,
 ) -> sire.System:
     """Run a BioSimSpace production MD procedure.
 
     BioSimSpace creates the base Production protocol.  When ``params`` is
     ``None`` the module-level ``_NPT_STABILITY_PARAMS`` overrides are applied
-    (2 fs timestep, relaxed LINCS warning angle).  BSS-generated settings that
-    proved correct during integration testing (gen-vel, continuation, barostat,
-    thermostat) are left untouched so the production stage inherits a consistent
-    environment regardless of the preceding equilibration integrator.
+    (2 fs timestep, relaxed LINCS warning angle).
+
+    When ``checkpoint_path`` is supplied it must point to the ``gromacs.cpt``
+    file from the final NPT equilibration stage.  The checkpoint is passed to
+    ``gmx mdrun`` via ``-cpi`` and the MDP is forced to
+    ``continuation = yes, gen_vel = no`` so that production starts with the
+    exact velocities at the end of NPT rather than drawing new ones.  This is
+    essential: freshly drawn Maxwell-Boltzmann velocities at 300 K can cause
+    immediate SETTLE failures when the system still has residual contacts from
+    equilibration (observed at step 568 in production when gen_vel=yes was used).
     """
     production_protocol = BSS.Protocol.Production(
         runtime=simulation_time,
@@ -487,4 +570,5 @@ def run_production(
         params=params if params is not None else _NPT_STABILITY_PARAMS,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS production",
+        checkpoint_path=checkpoint_path,
     )
