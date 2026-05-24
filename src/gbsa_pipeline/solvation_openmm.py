@@ -1,10 +1,43 @@
-"""OpenMM/ParmEd solvation that bypasses BioSimSpace IO."""
+"""OpenMM/ParmEd solvation and water-relaxation helpers.
+
+``solvate_openmm`` builds a solvated GROMACS system from an already
+parametrized complex using OpenMM ``Modeller.addSolvent`` and ParmEd.
+``relax_solvated_water`` is a post-solvation fix for the LJ clash problem
+inherent in OpenMM placement: ``addSolvent`` enforces a 0.23 nm minimum
+distance between new water oxygens and existing heavy atoms, but the
+Lennard-Jones repulsive core for typical C-O pairs has sigma ~0.32 nm,
+so newly placed water molecules can sit inside the repulsive wall.  The
+relaxation function freezes all non-water atoms and runs a short
+steepest-descent minimisation so water can escape those close contacts
+before the first MD step.
+
+Note on force field compatibility
+----------------------------------
+ParmEd writes explicit harmonic O-H bond springs (k ~463 000 kJ/mol/nm2)
+when rigidWater=False is used in the OpenMM system.  During a frozen-solute
+steepest-descent run these springs dominate the gradient (k/epsilon ratio
+~727 000) and can prevent water from moving away from LJ clashes.  If the
+LJ energy does not decrease after relaxation the caller should switch to a
+solvation path that uses pre-equilibrated water boxes (e.g. BSS.Solvent,
+which calls gmx solvate and places water at a safe minimum distance with
+SETTLE constraints intact).
+
+Crystal-water handling
+-----------------------
+``_restore_crystal_waters_before_solvation`` re-adds crystallographic waters
+extracted during parametrization before bulk solvent is placed.  A clash
+filter (``_CLASH_CUTOFF_NM = 0.25 nm``) drops any crystal water whose oxygen
+overlaps with a ligand or protein heavy atom so that docked poses do not
+create irrecoverable geometry at the binding site.
+"""
 
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import parmed as pmd
 from openmm import Vec3
@@ -179,7 +212,7 @@ def solvate_openmm(
     structure = pmd.openmm.load_topology(modeller.topology, system, modeller.positions)
 
     # ------------------------------------------------------------------
-    # 6. Write GROMACS gro + top.
+    # 7. Write GROMACS gro + top.
     # ------------------------------------------------------------------
     logger.debug("Writing GROMACS topology → %s …", output_top)
     structure.save(str(output_top), format="gromacs", overwrite=True)
@@ -192,6 +225,130 @@ def solvate_openmm(
         top_file=output_top,
         parmed_structure=structure,
     )
+
+
+_WATER_RESIDUES: frozenset[str] = frozenset({"HOH", "WAT", "SOL"})
+
+_WATER_RELAX_MDP = """\
+integrator          = steep
+nsteps              = {nsteps}
+emtol               = 10.0
+emstep              = 0.001
+cutoff-scheme       = Verlet
+nstlist             = 20
+rlist               = 1.2
+coulombtype         = PME
+rcoulomb            = 1.2
+fourierspacing      = 0.16
+pme-order           = 4
+vdwtype             = Cut-off
+vdw-modifier        = Force-switch
+rvdw-switch         = 1.0
+rvdw                = 1.2
+pbc                 = xyz
+freezegrps          = non-Water
+freezedim           = Y Y Y
+; SETTLE keeps water geometry rigid so SD follows the LJ gradient (not the
+; stiff ParmEd OH spring gradient that would otherwise dominate and push
+; oxygens in the wrong direction).
+constraints         = h-bonds
+constraint-algorithm = LINCS
+lincs-order         = 4
+lincs-warnangle     = 30
+nstlog              = 200
+nstenergy           = 200
+"""
+
+
+def relax_solvated_water(gro: Path, top: Path, work_dir: Path, *, nsteps: int = 2000) -> None:
+    """Run a frozen-solute GROMACS SD to push water out of the solute LJ core.
+
+    OpenMM ``addSolvent`` places water with a 0.23 nm minimum distance from
+    solute heavy atoms, which can be inside the LJ repulsive core (sigma ~
+    0.32 nm for C-O pairs). This function freezes all non-water atoms and runs
+    steepest-descent minimisation so water can move to lower-energy positions.
+    The relaxed coordinates overwrite *gro* in place; the topology is unchanged.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = gro.read_text().splitlines()
+    n_atoms = int(lines[1].strip())
+
+    nonwater_atoms: list[int] = []
+    for i, line in enumerate(lines[2 : 2 + n_atoms], start=1):
+        # GRO residue-name field: columns 5-9 (0-based). Lines shorter than
+        # 10 characters are malformed and skipped rather than crashing.
+        if len(line) >= len("    1RES  ATM") and line[5:10].strip() not in _WATER_RESIDUES:
+            nonwater_atoms.append(i)
+
+    ndx = work_dir / "freeze.ndx"
+    with ndx.open("w") as f:
+        f.write("[ System ]\n")
+        _write_ndx_indices(f, range(1, n_atoms + 1))
+        f.write("\n[ non-Water ]\n")
+        _write_ndx_indices(f, nonwater_atoms)
+
+    mdp = work_dir / "water_relax.mdp"
+    mdp.write_text(_WATER_RELAX_MDP.format(nsteps=nsteps))
+
+    tpr = work_dir / "water_relax.tpr"
+    grompp = subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "gmx",
+            "grompp",
+            "-f",
+            str(mdp),
+            "-c",
+            str(gro),
+            "-p",
+            str(top),
+            "-n",
+            str(ndx),
+            "-o",
+            str(tpr),
+            "-maxwarn",
+            "10",
+        ],
+        capture_output=True,
+        cwd=work_dir,
+        check=False,
+    )
+    if grompp.returncode != 0:
+        raise RuntimeError(f"gmx grompp failed during water relaxation:\n{grompp.stderr.decode()}")
+
+    mdrun = subprocess.run(
+        ["gmx", "mdrun", "-deffnm", "water_relax"],  # noqa: S607
+        capture_output=True,
+        cwd=work_dir,
+        check=False,
+    )
+    if mdrun.returncode != 0:
+        raise RuntimeError(f"gmx mdrun failed during water relaxation:\n{mdrun.stderr.decode()}")
+
+    relaxed_gro = work_dir / "water_relax.gro"
+    if not relaxed_gro.exists():
+        raise FileNotFoundError(f"Water relaxation output not found: {relaxed_gro}")
+
+    shutil.copy(relaxed_gro, gro)
+    logger.debug("Water relaxation complete; updated %s.", gro)
+
+
+_NDX_INDICES_PER_LINE = 15
+
+
+def _write_ndx_indices(f: IO[str], indices: Any) -> None:
+    """Write atom indices into an open GROMACS NDX file, 15 per line."""
+    batch: list[str] = []
+    for idx in indices:
+        batch.append(str(idx))
+        if len(batch) == _NDX_INDICES_PER_LINE:
+            f.write(" ".join(batch) + "\n")
+            batch = []
+    if batch:
+        f.write(" ".join(batch) + "\n")
+
+
+_CLASH_CUTOFF_NM: float = 0.25
 
 
 def _restore_crystal_waters_before_solvation(
@@ -207,10 +364,10 @@ def _restore_crystal_waters_before_solvation(
     protein-ligand system is parameterized dry. This helper uses OpenMM's own
     ``Modeller`` machinery to add missing hydrogens to those waters, writes a
     small inspection PDB, and adds the completed waters to the pre-solvation
-    modeller before ``addSolvent`` is called. The added waters therefore become
-    part of the pre-solvation system and are included in clash avoidance when
-    bulk water is placed. ``None`` is returned when no retained-water file is
-    available.
+    modeller before ``addSolvent`` is called. Waters whose oxygen is within
+    ``_CLASH_CUTOFF_NM`` of any existing heavy atom are dropped so that
+    binding-site crystal waters do not clash with the docked ligand.
+    ``None`` is returned when no retained-water file is available.
     """
     if crystal_waters_pdb is None:
         return None
@@ -227,6 +384,34 @@ def _restore_crystal_waters_before_solvation(
     water_modeller.addHydrogens(forcefield)
     atoms_after = water_modeller.topology.getNumAtoms()
 
+    # Build a list of existing heavy-atom positions (protein + ligand) in nm.
+    existing_positions = list(modeller.positions.value_in_unit(mm_unit.nanometer))
+    existing_heavy: list[tuple[float, float, float]] = []
+    for atom, pos in zip(modeller.topology.atoms(), existing_positions):
+        if atom.element is not None and atom.element.symbol != "H":
+            existing_heavy.append(pos)
+
+    # Identify which water residues (by oxygen position) clash with existing atoms.
+    clashing_residues: set[Any] = set()
+    water_positions_nm = list(water_modeller.positions.value_in_unit(mm_unit.nanometer))
+    for atom, pos in zip(water_modeller.topology.atoms(), water_positions_nm):
+        if atom.element is not None and atom.element.symbol == "O":
+            ox, oy, oz = pos
+            for ex, ey, ez in existing_heavy:
+                d2 = (ox - ex) ** 2 + (oy - ey) ** 2 + (oz - ez) ** 2
+                if d2 < _CLASH_CUTOFF_NM**2:
+                    clashing_residues.add(atom.residue)
+                    break
+
+    if clashing_residues:
+        logger.debug(
+            "Dropping %d crystal water(s) clashing with existing atoms (cutoff %.2f nm).",
+            len(clashing_residues),
+            _CLASH_CUTOFF_NM,
+        )
+        water_modeller.delete(list(clashing_residues))
+
+    n_restored = water_modeller.topology.getNumResidues()
     output_pdb.parent.mkdir(parents=True, exist_ok=True)
     with output_pdb.open("w", encoding="utf-8") as handle:
         PDBFile.writeFile(
@@ -239,7 +424,8 @@ def _restore_crystal_waters_before_solvation(
     modeller.add(water_modeller.topology, water_modeller.positions)
 
     logger.debug(
-        "Restored crystal waters with OpenMM hydrogens (%d -> %d atoms).",
+        "Restored %d crystal water(s) with OpenMM hydrogens (%d -> %d atoms).",
+        n_restored,
         atoms_before,
         atoms_after,
     )
