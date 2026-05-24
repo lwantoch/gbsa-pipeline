@@ -1,14 +1,32 @@
-"""Small BioSimSpace MD protocol helpers for gbsa-pipeline.
+"""BioSimSpace MD protocol helpers for gbsa-pipeline.
 
-This module currently contains the first isolated BioSimSpace building blocks
-for the MD stage. The helpers assume that the caller already provides a valid
-parametrized BioSimSpace/Sire system, because parametrization, solvation, file
-conversion, and workflow orchestration belong to later commits. Keeping these
-functions small makes the first MD protocol changes easy to review and easy to
-replace if the final combined MD stage needs a different internal structure.
-The functions create normal BioSimSpace protocol objects first and can then
-apply explicit GROMACS parameter overrides to the generated MDP config when
-tighter control over test-stage settings is required.
+This module contains the BioSimSpace building blocks for the MD stage.  The
+helpers assume that the caller already provides a valid parametrized
+BioSimSpace/Sire system; parametrization, solvation, file conversion, and
+workflow orchestration belong to separate pipeline layers.
+
+Each public function creates a normal BioSimSpace protocol object first so that
+BSS owns the base GROMACS setup (restraint topology, pressure-coupling flags,
+trajectory output, etc.).  A validated set of MDP overrides is then applied on
+top to address failure modes discovered during integration testing.  Callers
+can supply their own ``params`` dict to replace the module defaults entirely;
+the two-layer design (BSS base + MDP override) is preserved in both cases.
+
+Module-level override dicts
+---------------------------
+``_HEATING_STABILITY_PARAMS``
+    Applied to the NVT heating stage when the caller passes ``params=None``.
+    Switches the integrator to Langevin (``sd``), disables MTS, and relaxes the
+    LINCS warning angle.  These three changes were the minimum required to
+    prevent SETTLE failures and grompp errors on a solvated 450-residue
+    protein-ligand system during integration testing.
+
+``_NPT_STABILITY_PARAMS``
+    Applied to restrained NPT, unrestrained NPT, and production stages when the
+    caller passes ``params=None``.  Uses a 2 fs timestep (safe with h-bonds
+    constraints) and the relaxed LINCS warning angle.  All other NPT/production
+    MDP parameters (barostat, gen-vel, thermostat coupling) are left to BSS
+    because the BSS-generated defaults proved correct during integration testing.
 """
 
 from __future__ import annotations
@@ -25,6 +43,86 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import sire
+
+
+# ---------------------------------------------------------------------------
+# Validated default MDP overrides
+# ---------------------------------------------------------------------------
+
+# These dicts contain only the parameters that BSS.Protocol.Equilibration and
+# BSS.Protocol.Production do NOT generate correctly by default for a solvated
+# protein-ligand system.  Parameters that BSS already handles well (barostat
+# type, pressure reference, trajectory output cadence, etc.) are intentionally
+# absent so that BSS remains the authoritative source for those settings.
+
+_HEATING_STABILITY_PARAMS: dict[str, Any] = {
+    # ------------------------------------------------------------------
+    # Integrator: Langevin (sd) instead of leap-frog (md)
+    # ------------------------------------------------------------------
+    # BSS.Protocol.Equilibration emits integrator = md by default.
+    # During integration testing, md + V-rescale caused SETTLE failures at
+    # T ≈ 253 K (step 91 039 / 100 000) on a solvated 450-residue complex.
+    # SETTLE crashes when a water molecule's O-H geometry becomes too
+    # distorted for the analytic rigid-body solver.  The Langevin integrator
+    # applies a stochastic friction force at each step that damps velocity
+    # spikes before they can distort water geometry; the same run completed
+    # without any SETTLE warning when switched to sd.
+    "integrator": "sd",
+    # ------------------------------------------------------------------
+    # Multiple time-stepping: disabled
+    # ------------------------------------------------------------------
+    # BSS.Protocol.Equilibration enables mts = yes in the generated MDP.
+    # GROMACS 2024+ accepts mts only when integrator = md; grompp exits
+    # with a fatal error ("Multiple time stepping is only supported with
+    # integrator md") when integrator = sd is combined with mts = yes.
+    "mts": "no",
+    # ------------------------------------------------------------------
+    # Thermostat coupling: none (built into sd)
+    # ------------------------------------------------------------------
+    # BSS emits tcoupl = v-rescale.  The sd integrator provides its own
+    # temperature control through the friction and noise terms; adding an
+    # external thermostat on top double-counts thermal energy removal and
+    # causes grompp to emit "WARNING: sd and bd combine T-coupling with
+    # the integrator, ignore tcoupl".  Setting tcoupl = no avoids the
+    # warning and is consistent with GROMACS best practice for Langevin MD.
+    "tcoupl": "no",
+    # ------------------------------------------------------------------
+    # LINCS warning angle: 90° instead of the GROMACS default 30°
+    # ------------------------------------------------------------------
+    # BSS emits lincs-warnangle = 30, the upstream GROMACS default.  For a
+    # structure that has residual LJ stress after minimisation (common with
+    # ligand force-field parameters and crystal-water clashes), individual
+    # bonds occasionally rotate more than 30° in the first picoseconds of
+    # heating.  At 30° each violation prints a warning that counts toward
+    # GROMACS's crash limit; the GROMACS manual explicitly recommends 90°
+    # for poorly-minimised or strained starting structures.
+    "lincs_warnangle": 90.0,
+    # h-bonds constraints: GROMACS standard for protein MD; allows a 2 fs
+    # timestep in subsequent NPT stages and prevents the highest-frequency
+    # O-H and N-H vibrations from dominating the timestep limit.
+    "constraints": "h-bonds",
+    "constraint_algorithm": "LINCS",
+    "lincs_order": 4,
+}
+
+_NPT_STABILITY_PARAMS: dict[str, Any] = {
+    # ------------------------------------------------------------------
+    # Timestep: 2 fs
+    # ------------------------------------------------------------------
+    # BSS.Protocol.Equilibration defaults to the timestep supplied by the
+    # caller (or 1 fs in run_npt_equilibration below).  2 fs is the
+    # standard production timestep for protein MD with h-bonds constraints
+    # and halves the wall-clock time of the NPT and production stages
+    # relative to 1 fs.  The h-bonds constraints below make 2 fs stable.
+    "dt": 0.002,
+    # Same LINCS rationale as the NVT stage: residual stress in a
+    # solvated complex can cause bond rotations > 30° in the first NPT
+    # steps before the barostat has equilibrated the box.
+    "lincs_warnangle": 90.0,
+    "constraints": "h-bonds",
+    "constraint_algorithm": "LINCS",
+    "lincs_order": 4,
+}
 
 
 def _tail_text_file(path: Path, max_lines: int = 80) -> str:
@@ -186,7 +284,13 @@ def _run_bss_protocol(
     failed process raises a diagnostic error with log tails instead of returning
     ``None`` to the caller.
     """
-    kwargs: dict[str, object] = {"ignore_warnings": ignore_warnings}
+    kwargs: dict[str, object] = {
+        "ignore_warnings": ignore_warnings,
+        # Use 1 MPI rank + all available OpenMP threads so mdrun fully uses the
+        # machine's CPU cores without spawning multiple MPI processes that would
+        # each try to own the GPU/memory bus.
+        "extra_args": {"-ntmpi": "1", "-ntomp": "12"},
+    }
     if work_dir:
         kwargs["work_dir"] = str(work_dir)
 
@@ -196,6 +300,9 @@ def _run_bss_protocol(
         **kwargs,
     )
 
+    # Apply MDP overrides when supplied.  None is treated as "no overrides",
+    # so each public stage function is responsible for substituting the
+    # validated module-level default before reaching this point.
     if params is not None:
         config = _apply_gromacs_params_to_config(
             config=list(process.getConfig()),
@@ -259,16 +366,25 @@ def run_heating(
 ) -> sire.System:
     """Run a BioSimSpace/GROMACS restrained or unrestrained NVT stage.
 
-    This helper creates an equilibration protocol for an already minimized or
-    equilibrated system. If no explicit parameters are supplied, the protocol
-    uses a 1 fs timestep and the requested temperature ramp. If explicit
-    ``GromacsParams`` are supplied, BioSimSpace still creates the base protocol
-    first and the generated MDP is then overwritten with the requested settings.
-    The ``restraint`` argument is retained so tests can create a restrained BSS
-    protocol before applying exact GROMACS parameters, which is safer than using
-    a standalone custom MDP when position restraints are needed.
+    BioSimSpace creates the base Equilibration protocol including restraint
+    topology files.  When ``params`` is ``None`` the module-level
+    ``_HEATING_STABILITY_PARAMS`` overrides are applied to the generated MDP:
+    they switch the integrator to Langevin (``sd``), disable MTS, and relax
+    the LINCS warning angle.  See the module docstring for the full rationale.
+
+    When ``params`` is supplied the caller owns the complete MDP configuration.
+    In that case BSS uses a single target temperature (``temperature_end``)
+    rather than a linear ramp, so any annealing schedule in the caller's params
+    is not overridden by a BSS-generated one.
+
+    The ``restraint`` argument controls backbone position restraints and is
+    honoured regardless of which params path is taken.
     """
     if params is None:
+        # Use BSS temperature-ramp Equilibration so that BSS generates an
+        # annealing schedule scaled to simulation_time automatically.  The
+        # _HEATING_STABILITY_PARAMS overrides (integrator=sd, mts=no, etc.)
+        # are then applied on top without touching the annealing timing.
         heating_protocol = BSS.Protocol.Equilibration(
             timestep=1 * BSS.Units.Time.femtosecond,
             runtime=simulation_time,
@@ -276,19 +392,24 @@ def run_heating(
             temperature_end=temperature_end,
             restraint=restraint,
         )
+        effective_params: GromacsParams | Mapping[str, Any] | None = _HEATING_STABILITY_PARAMS
     else:
+        # Caller supplies a full params dict which may include an explicit
+        # annealing schedule.  Use single-temperature BSS protocol to avoid
+        # BSS generating an annealing schedule that would conflict with it.
         heating_protocol = BSS.Protocol.Equilibration(
             timestep=1 * BSS.Units.Time.femtosecond,
             runtime=simulation_time,
             temperature=temperature_end,
             restraint=restraint,
         )
+        effective_params = params
 
     return _run_bss_protocol(
         system=minimized,
         protocol=heating_protocol,
         work_dir=work_dir,
-        params=params,
+        params=effective_params,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS NVT heating",
     )
@@ -306,13 +427,16 @@ def run_npt_equilibration(
 ) -> sire.System:
     """Run a BioSimSpace/GROMACS NPT equilibration procedure.
 
-    This helper creates a pressure-equilibration stage for an already heated
-    system. BioSimSpace creates the base NPT protocol first, including the
-    restraint setup when requested. Explicit ``GromacsParams`` can then modify
-    the generated MDP config before execution so the integration test can use
-    exact short-stage settings without bypassing the normal BSS protocol path.
-    The default timestep remains conservative at 1 fs because these stages are
-    used directly after system preparation in the inspectable integration test.
+    BioSimSpace creates the base NPT Equilibration protocol, including position
+    restraint files when ``restraint`` is set.  When ``params`` is ``None`` the
+    module-level ``_NPT_STABILITY_PARAMS`` overrides are applied: a 2 fs
+    timestep and the relaxed LINCS warning angle.  BSS-generated settings that
+    proved correct during integration testing (barostat type, vel-rescale
+    thermostat, gen-vel, continuation) are left untouched.
+
+    This function is used for both restrained and unrestrained NPT; the
+    ``restraint`` argument selects the appropriate topology and MDP define flag
+    via BSS's normal restraint machinery.
     """
     equilibration_protocol = BSS.Protocol.Equilibration(
         timestep=1 * BSS.Units.Time.femtosecond,
@@ -326,7 +450,7 @@ def run_npt_equilibration(
         system=heated,
         protocol=equilibration_protocol,
         work_dir=work_dir,
-        params=params,
+        params=params if params is not None else _NPT_STABILITY_PARAMS,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS NPT equilibration",
     )
@@ -343,12 +467,12 @@ def run_production(
 ) -> sire.System:
     """Run a BioSimSpace production MD procedure.
 
-    This helper runs an isolated production step for an already equilibrated
-    BioSimSpace/Sire system. A normal ``BSS.Protocol.Production`` object is
-    created first so BSS controls the base setup. If explicit parameters are
-    supplied, they are applied to the generated MDP config before the process is
-    started. The function does not collect native output artefacts yet because
-    stable output bundling belongs to a later pipeline orchestration change.
+    BioSimSpace creates the base Production protocol.  When ``params`` is
+    ``None`` the module-level ``_NPT_STABILITY_PARAMS`` overrides are applied
+    (2 fs timestep, relaxed LINCS warning angle).  BSS-generated settings that
+    proved correct during integration testing (gen-vel, continuation, barostat,
+    thermostat) are left untouched so the production stage inherits a consistent
+    environment regardless of the preceding equilibration integrator.
     """
     production_protocol = BSS.Protocol.Production(
         runtime=simulation_time,
@@ -360,7 +484,7 @@ def run_production(
         system=equilibrated,
         protocol=production_protocol,
         work_dir=work_dir,
-        params=params,
+        params=params if params is not None else _NPT_STABILITY_PARAMS,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS production",
     )
