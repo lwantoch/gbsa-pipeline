@@ -120,14 +120,14 @@ class GeneralParams:
 class GBParams:
     """Parameters for the ``&gb`` (Generalized Born) namelist section.
 
-    This dataclass exposes the full set of GB solvation parameters used by
-    gmx_MMPBSA, including the GB model index (``igb``), dielectric constants,
-    surface tension terms, and optional QM/MM settings.  QM/MM fields
-    (``ifqnt``, ``qm_theory``, ``qm_residues``, etc.) are only meaningful when
-    ``ifqnt = 1``; they are included here for completeness and left at their
-    defaults otherwise.  The ``extra`` dict allows passing any additional
-    keyword accepted by the underlying sander/AMBER engine without modifying
-    this class.
+    This dataclass exposes the GB solvation parameters used by gmx_MMPBSA,
+    including the GB model index (``igb``), dielectric constants, and surface
+    tension terms.  QM/MM fields (``ifqnt``, ``qm_theory``, ``qm_residues``,
+    etc.) default to ``None`` and are omitted from the written file unless
+    explicitly set; this avoids ``Unknown variable`` errors from gmx_MMPBSA
+    versions that do not recognise QM/MM keywords when QM/MM is inactive.
+    The ``extra`` dict allows passing any additional keyword accepted by the
+    underlying sander/AMBER engine without modifying this class.
     See https://valdes-tresanco-ms.github.io/gmx_MMPBSA/dev/input_file/#gb
     for the full reference.
     """
@@ -135,7 +135,13 @@ class GBParams:
     igb: int = 5
     intdiel: float = 1.0
     extdiel: float = 78.5
-    saltcon: float = 0.0
+    # Physiological NaCl concentration (0.15 mol/L). The previous default of
+    # 0.0 implies vacuum (no ionic screening), which causes the GB implicit
+    # solvent to overestimate the electrostatic solvation free energy because
+    # the Debye-Huckel screening term is absent. 0.15 mol/L matches the ionic
+    # strength used in the explicit-solvent MD stages and is the standard value
+    # cited in the gmx_MMPBSA documentation for protein-ligand GB calculations.
+    saltcon: float = 0.15
 
     surften: float = 0.0072
     surfoff: float = 0.0
@@ -143,21 +149,21 @@ class GBParams:
     msoffset: float = 0.0
     probe: float = 1.4
 
-    # QM/MM options
-    ifqnt: int = 0
-    qm_theory: str = ""
-    qm_residues: str = ""
-    qmcharge_com: int = 0
-    qmcharge_lig: int = 0
-    qmcharge_rec: int = 0
-    qmcut: float = 9999.0
-    scfconv: float = 1e-08
-    peptide_corr: int = 0
-    writepdb: int = 1
-    verbosity: int = 0
+    # QM/MM options — omitted by default; only write when ifqnt = 1
+    ifqnt: int | None = None
+    qm_theory: str | None = None
+    qm_residues: str | None = None
+    qmcharge_com: int | None = None
+    qmcharge_lig: int | None = None
+    qmcharge_rec: int | None = None
+    qmcut: float | None = None
+    scfconv: float | None = None
+    peptide_corr: int | None = None
+    writepdb: int | None = None
+    verbosity: int | None = None
 
-    alpb: int = 0
-    arad_method: int = 1
+    alpb: int | None = None
+    arad_method: int | None = None
 
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -303,7 +309,8 @@ def run_gmx_mmpbsa_from_gromacs(
 ) -> subprocess.CompletedProcess[str]:
     """Run gmx_MMPBSA against GROMACS-format inputs and return the completed process.
 
-    ``complex_structure`` is passed via ``-cs`` (gro or pdb), ``trajectory``
+    ``complex_structure`` is passed via ``-cs`` and must be a ``.tpr`` or ``.pdb``
+    file — gmx_MMPBSA does not accept ``.gro`` for this flag.  ``trajectory``
     via ``-ct`` (xtc), ``topology`` via ``-cp`` (top), and ``index_file`` via
     ``-ci`` (ndx).  ``receptor_group`` and ``ligand_group`` are the integer
     group indices within the index file (0-based as written by ``gmx make_ndx``)
@@ -319,12 +326,22 @@ def run_gmx_mmpbsa_from_gromacs(
     .. code-block:: text
 
         -O              overwrite existing output files
+        -nogui          suppress the gmx_MMPBSA_ana post-processing GUI
         -i  input_file
         -cs complex_structure
         -ct trajectory
         -cp topology
         -ci index_file
         -cg receptor_group ligand_group
+
+    ``-nogui`` is always passed because gmx_MMPBSA v1.5.0.3 attempts to launch
+    the ``gmx_MMPBSA_ana`` PyQt5 GUI after every successful calculation.  On
+    systems where PyQt5 is absent or the display is not available (CI, headless
+    servers, Conda environments without the Qt stack), the launcher exits with
+    return code 1 even though the energy calculation completed correctly.  The
+    ``-nogui`` flag skips the GUI launch and lets the return code reflect the
+    actual calculation outcome.  Callers that want the GUI can open
+    ``gmx_MMPBSA_ana`` manually from the output directory afterwards.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -332,6 +349,8 @@ def run_gmx_mmpbsa_from_gromacs(
     cmd = [
         gmx_mmpbsa,
         "-O",
+        # See docstring: always suppress the PyQt5 GUI launcher.
+        "-nogui",
         "-i",
         str(input_file),
         "-cs",
