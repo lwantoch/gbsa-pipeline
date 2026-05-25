@@ -32,10 +32,12 @@ from gbsa_pipeline.docking import (
 )
 from gbsa_pipeline.gromacs_index import write_index_from_system
 from gbsa_pipeline.md import (
+    remove_clashing_solvent_waters,
     run_heating,
     run_minimization,
     run_npt_equilibration,
     run_production,
+    run_solvent_relaxation,
 )
 from gbsa_pipeline.mmbsa import MMPBSAConfig, run_gmx_mmpbsa_from_gromacs
 from gbsa_pipeline.parametrization import (
@@ -361,6 +363,8 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     solvation_dir = module_run_dir / "solvation"
     sd_minimization_dir = module_run_dir / "sd"
     cg_minimization_dir = module_run_dir / "cg"
+    water_cleanup_dir = module_run_dir / "water_cleanup"
+    solvent_relax_dir = module_run_dir / "solvent_relax"
     nvt_restrained_dir = module_run_dir / "nvt_res"
     npt_restrained_dir = module_run_dir / "npt_res"
     npt_unrestrained_dir = module_run_dir / "npt"
@@ -372,6 +376,8 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
         solvation_dir,
         sd_minimization_dir,
         cg_minimization_dir,
+        water_cleanup_dir,
+        solvent_relax_dir,
         nvt_restrained_dir,
         npt_restrained_dir,
         npt_unrestrained_dir,
@@ -507,14 +513,33 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     assert cg_minimized is not None
     assert any(cg_minimization_dir.iterdir())
 
+    cleaned_for_relaxation = remove_clashing_solvent_waters(
+        cg_minimized,
+        work_dir=water_cleanup_dir,
+        cutoff_angstrom=1.5,
+    )
+
+    assert cleaned_for_relaxation is not None
+    assert (water_cleanup_dir / "water_cleanup.txt").exists(), "Water cleanup report was not written"
+
+    solvent_relaxed = run_solvent_relaxation(
+        cleaned_for_relaxation,
+        work_dir=solvent_relax_dir,
+        params=SOLVENT_RELAX_PARAMS,
+        simulation_time=2 * BSS.Units.Time.picosecond,
+    )
+
+    assert solvent_relaxed is not None
+    assert any(solvent_relax_dir.iterdir())
+
     # BSS protocol runtime must match HEATING_PARAMS nsteps x dt to prevent BSS
     # from timing out before the MDP run finishes and passing a truncated
-    # checkpoint to the next stage (observed in pytest-37 with the 12 nm box).
+    # checkpoint to the next stage. Here: 100000 steps * 0.001 ps = 100 ps.
     # Checkpoint continuity: NVT writes gromacs.cpt, which NPT restrained reads
     # via grompp -t.
     nvt_restrained = run_heating(
         100 * BSS.Units.Time.picosecond,
-        cg_minimized,
+        solvent_relaxed,
         work_dir=nvt_restrained_dir,
         params=HEATING_PARAMS,
         temperature_start=50 * BSS.Units.Temperature.kelvin,
