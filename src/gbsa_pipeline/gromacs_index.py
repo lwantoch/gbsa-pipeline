@@ -33,31 +33,35 @@ def write_index_from_system(
     The function iterates over every molecule in ``system`` in order,
     accumulating 1-based global atom indices for the molecule matched by
     ``protein`` and the molecule matched by ``ligand``; all other molecules
-    are counted but silently skipped.  The groups are written as
-    ``[ Receptor ]`` and ``[ Ligand ]`` sections, which are the names
-    expected by gmx_MMPBSA when the ``-cg`` flag is used with group numbers
-    0 and 1.  Raises ``RuntimeError`` if either molecule is not found in
-    the system, to fail early rather than silently produce an incomplete
+    are counted but silently skipped.  Molecules are matched by their
+    ``number()`` identifier rather than by Python object identity, so the
+    function works correctly with sire systems where iteration may yield new
+    wrapper objects around the same underlying C++ molecule.  The groups are
+    written as ``[ Receptor ]`` and ``[ Ligand ]`` sections, which are the
+    names expected by gmx_MMPBSA when the ``-cg`` flag is used with group
+    numbers 0 and 1.  Raises ``RuntimeError`` if either molecule is not found
+    in the system, to fail early rather than silently produce an incomplete
     index file.
     See the GROMACS index file format documentation at
     https://manual.gromacs.org/documentation/current/reference-manual/file-formats.html#ndx
     for the format specification.
     """
-    protein_idx = system.getIndex(protein)
-    ligand_idx = system.getIndex(ligand)
+    protein_num = protein.number()
+    ligand_num = ligand.number()
 
     receptor_atoms: list[int] = []
     ligand_atoms: list[int] = []
 
     atom_counter = 1  # GROMACS uses 1-based indexing
 
-    for i, mol in enumerate(system):
-        natoms = mol.nAtoms()
+    for mol in system:
+        natoms = len(mol.atoms())
         start = atom_counter
         end = atom_counter + natoms
-        if i == protein_idx:
+        num = mol.number()
+        if num == protein_num:
             receptor_atoms.extend(range(start, end))
-        elif i == ligand_idx:
+        elif num == ligand_num:
             ligand_atoms.extend(range(start, end))
         atom_counter = end
 

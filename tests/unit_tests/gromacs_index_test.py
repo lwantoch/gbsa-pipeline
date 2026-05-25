@@ -13,22 +13,20 @@ if TYPE_CHECKING:
 
 
 class _FakeMol:
-    def __init__(self, n_atoms: int) -> None:
+    def __init__(self, n_atoms: int, number: int) -> None:
         self._n = n_atoms
+        self._num = number
 
-    def nAtoms(self) -> int:  # noqa: N802
-        return self._n
+    def atoms(self) -> range:
+        return range(self._n)
+
+    def number(self) -> int:
+        return self._num
 
 
 class _FakeSystem:
     def __init__(self, molecules: list[_FakeMol]) -> None:
         self._mols = molecules
-
-    def getIndex(self, mol: _FakeMol) -> int:  # noqa: N802
-        try:
-            return self._mols.index(mol)
-        except ValueError:
-            return -1
 
     def __iter__(self):
         return iter(self._mols)
@@ -50,8 +48,8 @@ def _read_index(path: Path) -> str:
 
 def test_two_molecule_system(tmp_path: Path) -> None:
     """Protein at idx 0, ligand at idx 1 - correct 1-based atom numbers."""
-    protein = _FakeMol(3)
-    ligand = _FakeMol(2)
+    protein = _FakeMol(3, number=1)
+    ligand = _FakeMol(2, number=2)
     system = _FakeSystem([protein, ligand])
 
     out = tmp_path / "test.ndx"
@@ -68,9 +66,9 @@ def test_two_molecule_system(tmp_path: Path) -> None:
 
 def test_three_molecule_system(tmp_path: Path) -> None:
     """Protein + solvent + ligand - only protein and ligand atoms written; offsets correct."""
-    protein = _FakeMol(5)
-    solvent = _FakeMol(10)
-    ligand = _FakeMol(3)
+    protein = _FakeMol(5, number=1)
+    solvent = _FakeMol(10, number=2)
+    ligand = _FakeMol(3, number=3)
     system = _FakeSystem([protein, solvent, ligand])
 
     out = tmp_path / "test.ndx"
@@ -85,8 +83,8 @@ def test_three_molecule_system(tmp_path: Path) -> None:
 
 def test_write_group_line_wrapping(tmp_path: Path) -> None:
     """16 protein atoms - first line has 15 atoms, second has 1."""
-    protein = _FakeMol(16)
-    ligand = _FakeMol(1)
+    protein = _FakeMol(16, number=1)
+    ligand = _FakeMol(1, number=2)
     system = _FakeSystem([protein, ligand])
 
     out = tmp_path / "test.ndx"
@@ -105,9 +103,9 @@ def test_write_group_line_wrapping(tmp_path: Path) -> None:
 
 def test_protein_not_in_system(tmp_path: Path) -> None:
     """Protein absent from system raises RuntimeError."""
-    protein = _FakeMol(3)
-    other = _FakeMol(2)
-    ligand = _FakeMol(2)
+    protein = _FakeMol(3, number=1)
+    other = _FakeMol(2, number=2)
+    ligand = _FakeMol(2, number=3)
     system = _FakeSystem([other, ligand])  # protein not included
 
     with pytest.raises(RuntimeError, match="Protein"):
@@ -116,9 +114,9 @@ def test_protein_not_in_system(tmp_path: Path) -> None:
 
 def test_ligand_not_in_system(tmp_path: Path) -> None:
     """Ligand absent from system raises RuntimeError."""
-    protein = _FakeMol(3)
-    ligand = _FakeMol(2)
-    other = _FakeMol(2)
+    protein = _FakeMol(3, number=1)
+    ligand = _FakeMol(2, number=2)
+    other = _FakeMol(2, number=3)
     system = _FakeSystem([protein, other])  # ligand not included
 
     with pytest.raises(RuntimeError, match="Ligand"):
