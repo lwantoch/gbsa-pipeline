@@ -20,6 +20,7 @@ from pathlib import Path
 from subprocess import CompletedProcess, run
 from typing import TYPE_CHECKING, Any, Protocol
 
+import numpy as np
 from meeko import MoleculePreparation, PDBQTMolecule, PDBQTWriterLegacy, RDKitMolCreate
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from rdkit import Chem
@@ -703,6 +704,136 @@ def prepare_ligand_with_meeko(
     LOGGER.info("Ligand PDBQT written: %s", output_path.name)
 
     return output_path
+
+
+_WATER_RESNAMES: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL"})
+
+
+# ---------------------------------------------------------------------------
+# Crystal-water docking: data types
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DockingValidation:
+    """Post-docking geometry checks for one docked pose.
+
+    All distances are in Å.  Each entry in the clash lists is a
+    ``(description, distance)`` tuple; bridge entries are
+    ``(water_res_id, ligand_description, protein_description, lig_dist, prot_dist)``.
+    """
+
+    ligand_protein_clashes: list[tuple[str, float]]
+    ligand_water_clashes: list[tuple[str, float]]
+    water_protein_clashes: list[tuple[str, float]]
+    water_bridges: list[tuple[str, str, str, float, float]]
+
+    @property
+    def has_clashes(self) -> bool:
+        """Return True when any clash list is non-empty."""
+        return bool(self.ligand_protein_clashes or self.ligand_water_clashes or self.water_protein_clashes)
+
+
+@dataclass(frozen=True)
+class DockingManifest:
+    """Complete record of a dual docking run with and without active-site crystal waters.
+
+    ``with_waters`` is ``None`` when no crystal waters passed the selection
+    criteria (inside box + near ligand + no receptor clash).
+    """
+
+    without_waters: DockingResult
+    with_waters: DockingResult | None
+    score_without: float | None
+    score_with: float | None
+    retained_water_ids: list[str]
+    receptor_without_waters: Path
+    receptor_with_waters: Path | None
+    validation_without: DockingValidation | None
+    validation_with: DockingValidation | None
+
+
+# ---------------------------------------------------------------------------
+# Crystal-water docking: helpers
+# ---------------------------------------------------------------------------
+
+
+def _pdb_heavy_atom_coords(
+    pdb_path: Path,
+    *,
+    exclude_residues: frozenset[str] = _WATER_RESNAMES,
+) -> np.ndarray:
+    """Return (N, 3) array of non-hydrogen, non-water PDB atom coordinates in Å."""
+    coords: list[list[float]] = []
+    for line in pdb_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith(("ATOM  ", "HETATM")):
+            continue
+        resname = line[17:20].strip().upper()
+        if resname in exclude_residues:
+            continue
+        atom_name = line[12:16].strip()
+        if atom_name.startswith("H"):
+            continue
+        try:
+            coords.append([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+        except ValueError:
+            continue
+    return np.array(coords) if coords else np.empty((0, 3))
+
+
+def _sdf_heavy_atom_coords(sdf_path: Path) -> np.ndarray:
+    """Return (N, 3) array of heavy-atom coordinates in Å from the first SDF conformer."""
+    mol = Chem.MolFromMolFile(str(sdf_path), removeHs=True, sanitize=False)
+    if mol is None or mol.GetNumConformers() == 0:
+        return np.empty((0, 3))
+    conf = mol.GetConformer(0)
+    return np.array([list(conf.GetAtomPosition(i)) for i in range(mol.GetNumAtoms())])
+
+
+def _pose_heavy_atom_coords(pose_path: Path) -> np.ndarray:
+    """Return (N, 3) heavy-atom coordinates for a docked pose in Å.
+
+    Accepts SDF/MOL (parsed with RDKit) or PDB/PDBQT (parsed column-by-column).
+    PDBQT from Vina uses standard PDB coordinate columns, so the same parser
+    applies to both.  This allows crystal-water selection to use the actual
+    docked position rather than the pre-docking embedded geometry.
+    """
+    suffix = pose_path.suffix.lower()
+    if suffix in (".pdb", ".pdbqt"):
+        return _pdb_heavy_atom_coords(pose_path, exclude_residues=frozenset())
+    return _sdf_heavy_atom_coords(pose_path)
+
+
+def _group_water_residues(
+    crystal_waters_pdb: Path,
+) -> list[tuple[str, list[str], tuple[float, float, float] | None]]:
+    """Parse a crystal-waters PDB into (res_id, lines, oxygen_xyz) groups."""
+    groups: list[tuple[str, list[str], tuple[float, float, float] | None]] = []
+    current_id: str | None = None
+    current_lines: list[str] = []
+    current_ow: tuple[float, float, float] | None = None
+
+    def _flush() -> None:
+        if current_id is not None:
+            groups.append((current_id, list(current_lines), current_ow))
+
+    for line in crystal_waters_pdb.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith(("ATOM  ", "HETATM")):
+            continue
+        res_id = line[22:26].strip()
+        if res_id != current_id:
+            _flush()
+            current_id = res_id
+            current_lines = []
+            current_ow = None
+        current_lines.append(line)
+        atom_name = line[12:16].strip()
+        if not atom_name.startswith("H") and current_ow is None:
+            with __import__("contextlib").suppress(ValueError):
+                current_ow = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+
+    _flush()
+    return groups
 
 
 class VinaEngine:
