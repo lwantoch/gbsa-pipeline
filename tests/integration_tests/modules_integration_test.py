@@ -57,7 +57,7 @@ DOCKPROTEIN_BOX = DockingBox(
 
 SD_PARAMS: dict[str, Any] = {
     "integrator": "steep",
-    "nsteps": 500000,
+    "nsteps": 100000,
     "emtol": 100.0,
     "emstep": 0.001,
     "cutoff_scheme": "Verlet",
@@ -66,7 +66,7 @@ SD_PARAMS: dict[str, Any] = {
     "rlist": 1.26,
     "coulombtype": "PME",
     "rcoulomb": 1.2,
-    "fourierspacing": 0.0,
+    "fourierspacing": 0.16,
     "pme_order": 4,
     "ewald_rtol": 1e-5,
     "vdwtype": "Cut-off",
@@ -84,7 +84,7 @@ SD_PARAMS: dict[str, Any] = {
 
 CG_PARAMS: dict[str, Any] = {
     "integrator": "cg",
-    "nsteps": 100000,
+    "nsteps": 50000,
     "emtol": 50.0,
     "emstep": 0.001,
     "nstcgsteep": 50,
@@ -130,18 +130,8 @@ SOLVENT_RELAX_PARAMS: dict[str, Any] = {
 }
 
 HEATING_PARAMS: dict[str, Any] = {
-    # sd (Langevin) integrator: more numerically stable than md near bad contacts because
-    # the stochastic friction term damps large velocity excursions that would otherwise
-    # distort water geometry and crash the SETTLE algorithm.  SETTLE errors at step
-    # ~91 000/100 000 were observed with md + V-rescale in pytest-39 (T≈253 K at crash).
-    # Annealing of ref_t is fully supported by sd; temperature coupling is built into
-    # the integrator so tcoupl must be "no".
-    "integrator": "sd",
-    # 1 fs timestep: safe for NVT with h-bonds constraints on a demanding starting
-    # structure; matches standard GROMACS protein-in-water tutorial (Lemkul, mdtutorials.com).
+    "integrator": "md",
     "dt": 0.001,
-    # 100 ps heating: consensus from GROMACS tutorials and Lemkul 2024
-    # (DOI:10.1021/acs.jpcb.4c04901); must match BSS call runtime below.
     "nsteps": 100000,
     "cutoff_scheme": "Verlet",
     "nstlist": 20,
@@ -159,24 +149,20 @@ HEATING_PARAMS: dict[str, Any] = {
     "constraints": "h-bonds",
     "constraint_algorithm": "LINCS",
     "lincs_order": 4,
-    "lincs_warnangle": 90.0,  # GROMACS manual: 90° recommended for poorly-minimised/strained starting structures
+    "lincs_warnangle": 90.0,
     "continuation": "no",
     "gen_vel": "yes",
-    "gen_temp": 20.0,
-    # tcoupl = no: required with sd integrator; temperature coupling is built in.
-    "tcoupl": "no",
+    "gen_temp": 50.0,
+    "tcoupl": "V-rescale",
     "tc_grps": "System",
     "tau_t": 0.1,
     "ref_t": 300.0,
     "pcoupl": "no",
     "annealing": "single",
-    "annealing_npoints": 8,
-    "annealing_time": "0 40.0 50.0 60.0 70.0 80.0 90.0 100.0",
-    "annealing_temp": "20.0 50.0 50.0 100.0 150.0 200.0 250.0 300.0 ",
+    "annealing_npoints": 6,
+    "annealing_time": "0 20 40 60 80 100",
+    "annealing_temp": "50 100 150 200 250 300",
     "define": "-DPOSRES",
-    # mts=no: BSS Equilibration enables multiple time stepping (mts=yes) for the md
-    # integrator; sd does not support MTS (GROMACS error: "Multiple time stepping is
-    # only supported with integrator md").
     "mts": "no",
     "nstlog": 500,
     "nstenergy": 500,
@@ -187,9 +173,9 @@ HEATING_PARAMS: dict[str, Any] = {
 NPT_RESTRAINED_PARAMS: dict[str, Any] = {
     "integrator": "md",
     "dt": 0.002,
-    # 200 ps restrained NPT: literature consensus for demanding systems is 100-200 ps
-    # (Lemkul 2024, DOI:10.1021/acs.jpcb.4c04901; gmx_MMPBSA ST example).
-    "nsteps": 100000,
+    # Recommended: 100-200 ps (Lemkul 2024, DOI:10.1021/acs.jpcb.4c04901;
+    # gmx_MMPBSA ST example); halved here for test speed.
+    "nsteps": 50000,
     "cutoff_scheme": "Verlet",
     "nstlist": 20,
     "pbc": "xyz",
@@ -231,10 +217,9 @@ NPT_RESTRAINED_PARAMS: dict[str, Any] = {
 NPT_PARAMS: dict[str, Any] = {
     "integrator": "md",
     "dt": 0.002,
-    # 200 ps unrestrained NPT: gradual removal of restraints needs extra time to
-    # let the protein relax; shorter runs leave the system under-equilibrated and
-    # cause production instabilities (observed in pytest-37).
-    "nsteps": 100000,
+    # Recommended: 200 ps; shorter runs can leave the system under-equilibrated and
+    # cause production instabilities (observed in pytest-37). Halved for test speed.
+    "nsteps": 50000,
     "cutoff_scheme": "Verlet",
     "nstlist": 20,
     "pbc": "xyz",
@@ -272,10 +257,10 @@ NPT_PARAMS: dict[str, Any] = {
 PRODUCTION_PARAMS: dict[str, Any] = {
     "integrator": "md",
     "dt": 0.002,
-    # 200 ps production: minimum recommended for GBSA averaging
-    # (Genheden & Ryde 2010, DOI:10.1002/jcc.21366; gmx_MMPBSA docs recommend
-    # at least 10-100 frames; 200 ps at nstxout_compressed=200 gives 100 frames).
-    "nsteps": 100000,
+    # Recommended: 200+ ps for GBSA averaging (Genheden & Ryde 2010,
+    # DOI:10.1002/jcc.21366; gmx_MMPBSA docs recommend >=10-100 frames;
+    # 200 ps at nstxout_compressed=200 gives 100 frames). Halved for test speed.
+    "nsteps": 50000,
     "cutoff_scheme": "Verlet",
     "nstlist": 20,
     "pbc": "xyz",
@@ -523,19 +508,14 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     assert nvt_restrained is not None
     assert any(nvt_restrained_dir.iterdir())
 
-    # BSS terminates mdrun when simulated time matches protocol runtime.
-    # With -cpt 1 in md.py, checkpoints are written every 1 minute, so a
-    # recent .cpt should always be present.  Pass it when it exists; if it
-    # is absent the next stage starts with gen_vel=yes (BSS default), which
-    # is safe after a completed 100 ps NVT run at 300 K.
-    nvt_cpt = nvt_restrained_dir / "gromacs.cpt"
+    nvt_res_cpt = nvt_restrained_dir / "gromacs.cpt"
     npt_restrained = run_npt_equilibration(
-        200 * BSS.Units.Time.picosecond,
+        100 * BSS.Units.Time.picosecond,
         nvt_restrained,
         work_dir=npt_restrained_dir,
         params=NPT_RESTRAINED_PARAMS,
         restraint="backbone",
-        checkpoint_path=nvt_cpt if nvt_cpt.exists() else None,
+        checkpoint_path=nvt_res_cpt if nvt_res_cpt.exists() else None,
     )
 
     assert npt_restrained is not None
@@ -543,7 +523,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     npt_res_cpt = npt_restrained_dir / "gromacs.cpt"
     npt_unrestrained = run_npt_equilibration(
-        200 * BSS.Units.Time.picosecond,
+        100 * BSS.Units.Time.picosecond,
         npt_restrained,
         work_dir=npt_unrestrained_dir,
         params=NPT_PARAMS,
@@ -556,7 +536,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     npt_cpt = npt_unrestrained_dir / "gromacs.cpt"
     production = run_production(
-        200 * BSS.Units.Time.picosecond,
+        100 * BSS.Units.Time.picosecond,
         npt_unrestrained,
         work_dir=production_dir,
         params=PRODUCTION_PARAMS,
