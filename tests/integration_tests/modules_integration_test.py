@@ -110,6 +110,25 @@ CG_PARAMS: dict[str, Any] = {
     "nstxout_compressed": 0,
 }
 
+SOLVENT_RELAX_PARAMS: dict[str, Any] = {
+    "integrator": "sd",
+    "dt": 0.001,
+    "nsteps": 2000,
+    "tcoupl": "no",
+    "mts": "no",
+    "lincs_warnangle": 90.0,
+    "constraints": "h-bonds",
+    "constraint_algorithm": "LINCS",
+    "lincs_order": 4,
+    "gen_vel": "yes",
+    "gen_temp": 300.0,
+    "define": "-DPOSRES",
+    "nstlog": 200,
+    "nstenergy": 200,
+    "nstcalcenergy": 100,
+    "nstxout_compressed": 0,
+}
+
 HEATING_PARAMS: dict[str, Any] = {
     # sd (Langevin) integrator: more numerically stable than md near bad contacts because
     # the stochastic friction term damps large velocity excursions that would otherwise
