@@ -57,6 +57,7 @@ starts from a minimized structure with no prior velocities.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -64,6 +65,9 @@ import BioSimSpace as BSS
 
 from gbsa_pipeline.change_defaults import GromacsParams
 from gbsa_pipeline.change_params import set_mdp_key
+from gbsa_pipeline.md_diagnostics import check_posre_consistency
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -288,6 +292,44 @@ def _remove_existing_mdp_key(config: list[str], key: str) -> list[str]:
     target_key = _normalise_mdp_key(key)
 
     return [line for line in config if _mdp_key_from_line(line) != target_key]
+
+
+def _check_stage_posre(work_dir: Path, stage_name: str) -> None:
+    """Run the position-restraint consistency check for a stage work directory.
+
+    BSS generates ``posre_*.itp`` files during process setup.  This helper
+    finds the first one and validates that every restrained atom maps to a
+    backbone heavy atom in the stage GRO.  Results are logged at DEBUG level
+    when the check passes and at WARNING level when unexpected atoms are found.
+    The check is advisory: it does not abort the stage, only logs.
+    """
+    gro = work_dir / "gromacs.gro"
+    posre_files = sorted(work_dir.glob("posre_*.itp"))
+    if not posre_files:
+        return
+
+    for posre_path in posre_files:
+        result = check_posre_consistency(gro, posre_path)
+        if not result.ok:
+            logger.warning(
+                "%s: posre validation FAILED for %s — "
+                "%d unexpected restrained atoms (first 5: %s). "
+                "Check that the restraint file matches the GRO atom order.",
+                stage_name,
+                posre_path.name,
+                len(result.unexpected),
+                result.unexpected[:5],
+            )
+        else:
+            logger.debug(
+                "%s: posre validation OK — %d backbone atoms restrained in %s.",
+                stage_name,
+                result.n_restrained,
+                posre_path.name,
+            )
+
+
+_GRO_WATER_RESNAMES = {"SOL", "HOH", "WAT", "TIP3", "TIP3P"}
 
 
 def _apply_gromacs_params_to_config(
