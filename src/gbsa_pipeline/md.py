@@ -16,10 +16,9 @@ Module-level override dicts
 ---------------------------
 ``_HEATING_STABILITY_PARAMS``
     Applied to the NVT heating stage when the caller passes ``params=None``.
-    Switches the integrator to Langevin (``sd``), disables MTS, and relaxes the
-    LINCS warning angle.  These three changes were the minimum required to
-    prevent SETTLE failures and grompp errors on a solvated 450-residue
-    protein-ligand system during integration testing.
+    Disables MTS and relaxes the LINCS warning angle.  Crystal waters must be
+    excluded from the input structure (see ``parametrization.py``) to avoid
+    SETTLE failures caused by crystallographic clashes.
 
 ``_NPT_STABILITY_PARAMS``
     Applied to restrained NPT, unrestrained NPT, and production stages when the
@@ -65,14 +64,14 @@ import BioSimSpace as BSS
 
 from gbsa_pipeline.change_defaults import GromacsParams
 from gbsa_pipeline.change_params import set_mdp_key
-from gbsa_pipeline.md_diagnostics import check_posre_consistency
-
-logger = logging.getLogger(__name__)
+from gbsa_pipeline.md_diagnostics import analyze_crash_frames, check_posre_consistency
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     import sire
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -87,45 +86,20 @@ if TYPE_CHECKING:
 
 _HEATING_STABILITY_PARAMS: dict[str, Any] = {
     # ------------------------------------------------------------------
-    # Integrator: Langevin (sd) instead of leap-frog (md)
-    # ------------------------------------------------------------------
-    # BSS.Protocol.Equilibration emits integrator = md by default.
-    # During integration testing, md + V-rescale caused SETTLE failures at
-    # T ≈ 253 K (step 91 039 / 100 000) on a solvated 450-residue complex.
-    # SETTLE crashes when a water molecule's O-H geometry becomes too
-    # distorted for the analytic rigid-body solver.  The Langevin integrator
-    # applies a stochastic friction force at each step that damps velocity
-    # spikes before they can distort water geometry; the same run completed
-    # without any SETTLE warning when switched to sd.
-    "integrator": "sd",
-    # ------------------------------------------------------------------
     # Multiple time-stepping: disabled
     # ------------------------------------------------------------------
     # BSS.Protocol.Equilibration enables mts = yes in the generated MDP.
-    # GROMACS 2024+ accepts mts only when integrator = md; grompp exits
-    # with a fatal error ("Multiple time stepping is only supported with
-    # integrator md") when integrator = sd is combined with mts = yes.
+    # GROMACS requires integrator = md for mts; disable it to keep the
+    # MDP valid regardless of which integrator the caller selects.
     "mts": "no",
-    # ------------------------------------------------------------------
-    # Thermostat coupling: none (built into sd)
-    # ------------------------------------------------------------------
-    # BSS emits tcoupl = v-rescale.  The sd integrator provides its own
-    # temperature control through the friction and noise terms; adding an
-    # external thermostat on top double-counts thermal energy removal and
-    # causes grompp to emit "WARNING: sd and bd combine T-coupling with
-    # the integrator, ignore tcoupl".  Setting tcoupl = no avoids the
-    # warning and is consistent with GROMACS best practice for Langevin MD.
-    "tcoupl": "no",
     # ------------------------------------------------------------------
     # LINCS warning angle: 90° instead of the GROMACS default 30°
     # ------------------------------------------------------------------
-    # BSS emits lincs-warnangle = 30, the upstream GROMACS default.  For a
-    # structure that has residual LJ stress after minimisation (common with
-    # ligand force-field parameters and crystal-water clashes), individual
-    # bonds occasionally rotate more than 30° in the first picoseconds of
-    # heating.  At 30° each violation prints a warning that counts toward
-    # GROMACS's crash limit; the GROMACS manual explicitly recommends 90°
-    # for poorly-minimised or strained starting structures.
+    # BSS emits lincs-warnangle = 30.  For a structure that has residual LJ
+    # stress after minimisation (ligand force-field parameters, tight pockets),
+    # individual bonds can rotate more than 30° in the first picoseconds of
+    # heating.  The GROMACS manual explicitly recommends 90° for strained
+    # starting structures.
     "lincs_warnangle": 90.0,
     # h-bonds constraints: GROMACS standard for protein MD; allows a 2 fs
     # timestep in subsequent NPT stages and prevents the highest-frequency
@@ -153,7 +127,6 @@ _NPT_STABILITY_PARAMS: dict[str, Any] = {
     "constraint_algorithm": "LINCS",
     "lincs_order": 4,
 }
-
 
 _SOLVENT_RELAX_PARAMS: dict[str, Any] = {
     # sd integrator: damps velocity spikes in waters that were placed too
@@ -241,6 +214,10 @@ def _format_gromacs_failure_report(work_dir: Path | None, stage_name: str) -> st
     if lincs_pdbs:
         report_parts.append("\nLINCS diagnostic PDB files:")
         report_parts.extend(str(path) for path in lincs_pdbs[-10:])
+        crash_report = analyze_crash_frames(work_dir)
+        if crash_report:
+            report_parts.append("\n--- crash frame analysis ---")
+            report_parts.append(crash_report)
 
     return "\n".join(report_parts)
 
@@ -293,44 +270,6 @@ def _remove_existing_mdp_key(config: list[str], key: str) -> list[str]:
     return [line for line in config if _mdp_key_from_line(line) != target_key]
 
 
-def _check_stage_posre(work_dir: Path, stage_name: str) -> None:
-    """Run the position-restraint consistency check for a stage work directory.
-
-    BSS generates ``posre_*.itp`` files during process setup.  This helper
-    finds the first one and validates that every restrained atom maps to a
-    backbone heavy atom in the stage GRO.  Results are logged at DEBUG level
-    when the check passes and at WARNING level when unexpected atoms are found.
-    The check is advisory: it does not abort the stage, only logs.
-    """
-    gro = work_dir / "gromacs.gro"
-    posre_files = sorted(work_dir.glob("posre_*.itp"))
-    if not posre_files:
-        return
-
-    for posre_path in posre_files:
-        result = check_posre_consistency(gro, posre_path)
-        if not result.ok:
-            logger.warning(
-                "%s: posre validation FAILED for %s — "
-                "%d unexpected restrained atoms (first 5: %s). "
-                "Check that the restraint file matches the GRO atom order.",
-                stage_name,
-                posre_path.name,
-                len(result.unexpected),
-                result.unexpected[:5],
-            )
-        else:
-            logger.debug(
-                "%s: posre validation OK — %d backbone atoms restrained in %s.",
-                stage_name,
-                result.n_restrained,
-                posre_path.name,
-            )
-
-
-_GRO_WATER_RESNAMES = {"SOL", "HOH", "WAT", "TIP3", "TIP3P"}
-
-
 def _apply_gromacs_params_to_config(
     config: list[str],
     params: GromacsParams | Mapping[str, Any],
@@ -356,6 +295,44 @@ def _apply_gromacs_params_to_config(
         set_mdp_key(updated_config, key, value, inplace=True)
 
     return updated_config
+
+
+def _check_stage_posre(work_dir: Path, stage_name: str) -> None:
+    """Run the position-restraint consistency check for a stage work directory.
+
+    BSS generates ``posre_*.itp`` files during process setup.  This helper
+    finds the first one and validates that every restrained atom maps to a
+    backbone heavy atom in the stage GRO.  Results are logged at DEBUG level
+    when the check passes and at WARNING level when unexpected atoms are found.
+    The check is advisory: it does not abort the stage, only logs.
+    """
+    gro = work_dir / "gromacs.gro"
+    posre_files = sorted(work_dir.glob("posre_*.itp"))
+    if not posre_files:
+        return
+
+    for posre_path in posre_files:
+        result = check_posre_consistency(gro, posre_path)
+        if not result.ok:
+            logger.warning(
+                "%s: posre validation FAILED for %s -- "
+                "%d unexpected restrained atoms (first 5: %s). "
+                "Check that the restraint file matches the GRO atom order.",
+                stage_name,
+                posre_path.name,
+                len(result.unexpected),
+                result.unexpected[:5],
+            )
+        else:
+            logger.debug(
+                "%s: posre validation OK -- %d backbone atoms restrained in %s.",
+                stage_name,
+                result.n_restrained,
+                posre_path.name,
+            )
+
+
+_GRO_WATER_RESNAMES = {"SOL", "HOH", "WAT", "TIP3", "TIP3P"}
 
 
 def _parse_gro_atom_line(
@@ -622,7 +599,7 @@ def remove_clashing_solvent_waters(
     does not remove protein atoms, ligand atoms, ions, metals, cofactors, or any
     residue with an unknown name. The cutoff is deliberately conservative for
     impossible contacts, not for normal hydration-shell pruning; a value around
-    1.4--1.5 Å removes contacts like the observed 1.13 Å water-oxygen to
+    1.4--1.5 A removes contacts like the observed 1.13 A water-oxygen to
     protein-carbon clash without deleting chemically reasonable waters. If no
     clashing waters are found, the saved GRO/TOP are still copied into the
     cleanup directory and the returned system is reloaded from those files.
@@ -740,7 +717,7 @@ def _run_bss_protocol(
     # velocities without needing -cpi.
     #
     # This is the correct approach for cross-stage velocity continuity:
-    # -cpi (mdrun restart) locks the integrator — GROMACS refuses to switch from
+    # -cpi (mdrun restart) locks the integrator -- GROMACS refuses to switch from
     # sd (NVT) to md (NPT) with "Cannot change integrator during a checkpoint
     # restart".  grompp -t has no such restriction and is designed exactly for
     # reading velocities when starting a new simulation from a previous state.
@@ -780,12 +757,27 @@ def _run_bss_protocol(
         set_mdp_key(config, "gen-vel", "no", inplace=True)
         process.setConfig(config)
 
+    # Validate position restraints before mdrun when the stage uses them.
+    # BSS writes posre_*.itp during setup; the indices must map to backbone
+    # atoms in the starting GRO to avoid restraining the wrong atoms.
+    if work_dir is not None:
+        _check_stage_posre(work_dir, stage_name)
+
     process.start()
     process.wait(max_time=max_time)
 
     result = process.getSystem(block=True)
     if result is None:
         raise RuntimeError(_format_gromacs_failure_report(work_dir, stage_name))
+
+    if work_dir is not None:
+        if _gromacs_log_finished(work_dir):
+            (work_dir / "success.txt").write_text("", encoding="utf-8")
+        else:
+            logger.warning(
+                "%s: 'Finished mdrun' not found in gromacs.log -- run may have been aborted or log is missing.",
+                stage_name,
+            )
 
     return result
 
@@ -819,6 +811,48 @@ def run_minimization(
         params=params,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS minimization",
+        max_time=max_time,
+    )
+
+
+def run_solvent_relaxation(
+    system: sire.System,
+    work_dir: Path | None = None,
+    params: GromacsParams | Mapping[str, Any] | None = None,
+    simulation_time: BSS.Types.Time | None = None,
+    *,
+    ignore_warnings: bool = True,
+    max_time: int | None = None,
+) -> sire.System:
+    """Run a short NVT with all heavy atoms restrained to relax the solvent.
+
+    BSS solvation can place water molecules within van der Waals overlap of
+    protein side-chain atoms.  Energy minimisation removes the worst clashes
+    but does not always give waters enough freedom to escape tight pockets.
+    Running a short NVT (default 20 ps) with all protein and ligand heavy
+    atoms restrained lets waters and ions find their equilibrium positions
+    before the full NVT heating ramp starts, preventing SETTLE failures that
+    originate from bad protein-water contacts.
+
+    When ``params`` is ``None`` the module-level ``_SOLVENT_RELAX_PARAMS``
+    overrides are applied (sd integrator, 1 fs timestep, no annealing,
+    T = 300 K, h-bonds constraints, lincs_warnangle = 90°).
+    """
+    runtime = simulation_time if simulation_time is not None else 20 * BSS.Units.Time.picosecond
+    protocol = BSS.Protocol.Equilibration(
+        timestep=1 * BSS.Units.Time.femtosecond,
+        runtime=runtime,
+        temperature=300 * BSS.Units.Temperature.kelvin,
+        restraint="heavy",
+    )
+    return _run_bss_protocol(
+        system=system,
+        protocol=protocol,
+        work_dir=work_dir,
+        params=params if params is not None else _SOLVENT_RELAX_PARAMS,
+        ignore_warnings=ignore_warnings,
+        stage_name="GROMACS solvent relaxation",
+        max_time=max_time,
     )
 
 
@@ -882,6 +916,7 @@ def run_heating(
         params=effective_params,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS NVT heating",
+        max_time=max_time,
     )
 
 
@@ -931,6 +966,7 @@ def run_npt_equilibration(
         params=params if params is not None else _NPT_STABILITY_PARAMS,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS NPT equilibration",
+        max_time=max_time,
         checkpoint_path=checkpoint_path,
     )
 
@@ -973,5 +1009,6 @@ def run_production(
         params=params if params is not None else _NPT_STABILITY_PARAMS,
         ignore_warnings=ignore_warnings,
         stage_name="GROMACS production",
+        max_time=max_time,
         checkpoint_path=checkpoint_path,
     )
