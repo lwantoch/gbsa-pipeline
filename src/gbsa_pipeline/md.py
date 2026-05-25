@@ -372,14 +372,20 @@ def _run_bss_protocol(
         process.setConfig(config)
 
     # When a checkpoint is supplied, force continuation=yes and gen_vel=no
-    # AFTER any caller overrides so the checkpoint always wins.  This overrides
-    # any gen_vel=yes / continuation=no that a caller's params dict might have
-    # set, because those are wrong when velocities are available in the CPT.
+    # AFTER any caller overrides so the checkpoint always wins.
+    #
+    # Do NOT use _apply_gromacs_params_to_config here: that function goes through
+    # GromacsParams.from_mapping → to_mapping, which emits ALL model defaults
+    # including nsteps=500 (the GromacsParams default).  Those defaults would
+    # overwrite any nsteps the caller set in the first setConfig call.  Instead,
+    # remove the two keys directly and append the fixed values so only those two
+    # MDP lines change and everything else (including nsteps/dt) is preserved.
     if checkpoint_path is not None:
-        config = _apply_gromacs_params_to_config(
-            list(process.getConfig()),
-            {"continuation": "yes", "gen_vel": "no"},
-        )
+        config = list(process.getConfig())
+        for _key in ("continuation", "gen-vel"):
+            config = _remove_existing_mdp_key(config, _key)
+        set_mdp_key(config, "continuation", "yes", inplace=True)
+        set_mdp_key(config, "gen-vel", "no", inplace=True)
         process.setConfig(config)
 
     process.start()
