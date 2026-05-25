@@ -21,9 +21,11 @@ import pytest
 
 from gbsa_pipeline.docking import (
     DockingBox,
+    DockingManifest,
     DockingRequest,
     VinaEngine,
     convert_receptor_pdb_to_pdbqt,
+    dock_with_and_without_crystal_waters,
     export_pdbqt_to_sdf,
     load_first_sdf_molecule,
     prepare_ligand_with_meeko,
@@ -354,6 +356,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     receptor_pdbqt = module_run_dir / "dockprotein.pdbqt"
     docked_sdf = module_run_dir / "dockligand_vina_out.sdf"
 
+    docking_dir = module_run_dir / "docking"
     parametrization_dir = module_run_dir / "parametrization"
     solvation_dir = module_run_dir / "solvation"
     sd_minimization_dir = module_run_dir / "sd"
@@ -364,6 +367,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     production_dir = module_run_dir / "production"
 
     for _d in (
+        docking_dir,
         parametrization_dir,
         solvation_dir,
         sd_minimization_dir,
@@ -397,26 +401,39 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
         binary="vina",
         mk_prepare_receptor_binary=MEEKO_RECEPTOR_BINARY,
     )
+    # Use PDB receptor so dock_with_and_without_crystal_waters can merge crystal
+    # waters into a receptor+waters PDB for the second docking run.
     request = DockingRequest(
-        receptor=receptor_pdbqt,
+        receptor=DOCKPROTEIN_PDB,
         ligands=[ligand_pdbqt],
         box=DOCKPROTEIN_BOX,
-        workdir=module_run_dir,
+        workdir=docking_dir,
     )
 
-    docking_result = engine.dock(request=request)
+    manifest: DockingManifest = dock_with_and_without_crystal_waters(
+        engine,
+        request,
+        crystal_waters_pdb=PARAMETRIZE_PROTEIN_PDB,
+        ligand_sdf=DOCKLIGAND_SDF,
+        work_dir=docking_dir,
+    )
 
-    docking_output = module_run_dir / "dockligand_vina_out.pdbqt"
-    docking_log = module_run_dir / "dockligand_vina.log"
+    assert manifest.without_waters.engine == "vina"
+    assert len(manifest.without_waters.poses) == 1
+    assert manifest.score_without is not None
+    assert isinstance(manifest.retained_water_ids, list)
 
-    assert docking_result.engine == "vina"
-    assert len(docking_result.poses) == 1
-    assert docking_result.poses[0].pose_path == docking_output
-    assert docking_result.poses[0].pose_path.exists()
-    assert docking_result.poses[0].metadata["returncode"] == 0
-    assert docking_result.poses[0].score is not None
-    assert docking_output.exists()
-    assert docking_log.exists()
+    # Prefer the with-water pose: crystal waters in the binding site enforce
+    # the correct geometry even when the score difference is within Vina noise.
+    assert manifest.with_waters is not None, "with-water docking produced no result"
+    assert manifest.with_waters.engine == "vina"
+    best_pose = manifest.with_waters.poses[0]
+    assert best_pose.pose_path.exists()
+    assert best_pose.metadata["returncode"] == 0
+    assert best_pose.score is not None
+    assert manifest.score_with is not None
+
+    docking_output = best_pose.pose_path
 
     exported_sdf = export_pdbqt_to_sdf(
         docking_output,
