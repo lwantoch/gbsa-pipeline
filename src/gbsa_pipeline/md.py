@@ -328,7 +328,12 @@ def _run_bss_protocol(
     # Use 1 MPI rank + all available OpenMP threads so mdrun fully uses the
     # machine's CPU cores without spawning multiple MPI processes that would
     # each try to own the GPU/memory bus.
-    extra_args: dict[str, str] = {"-ntmpi": "1", "-ntomp": "12"}
+    # -cpt 1: write a checkpoint every 1 minute of wall time.  BSS terminates
+    # mdrun when the simulated time matches the protocol runtime; GROMACS may
+    # not reach the default 15-minute checkpoint interval before BSS kills it,
+    # leaving no checkpoint file for the next stage to read velocities from.
+    # Writing every minute ensures a recent checkpoint always exists.
+    extra_args: dict[str, str] = {"-ntmpi": "1", "-ntomp": "12", "-cpt": "1"}
 
     kwargs: dict[str, object] = {
         "ignore_warnings": ignore_warnings,
