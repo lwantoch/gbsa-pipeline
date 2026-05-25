@@ -57,6 +57,7 @@ starts from a minimized structure with no prior velocities.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import BioSimSpace as BSS
@@ -149,6 +150,32 @@ _NPT_STABILITY_PARAMS: dict[str, Any] = {
     "constraint_algorithm": "LINCS",
     "lincs_order": 4,
 }
+
+
+_SOLVENT_RELAX_PARAMS: dict[str, Any] = {
+    # sd integrator: damps velocity spikes in waters that were placed too
+    # close to protein atoms by the solvation algorithm.  Heavy-atom
+    # restraints keep the protein/ligand fixed while waters and ions find
+    # their equilibrium positions before NVT heating begins.
+    "integrator": "sd",
+    "dt": 0.001,
+    "tcoupl": "no",
+    "mts": "no",
+    "lincs_warnangle": 90.0,
+    "constraints": "h-bonds",
+    "constraint_algorithm": "LINCS",
+    "lincs_order": 4,
+    "gen_vel": "yes",
+    "gen_temp": 300.0,
+}
+
+
+def _gromacs_log_finished(work_dir: Path) -> bool:
+    """Return True if the GROMACS log contains the 'Finished mdrun' marker."""
+    log_path = work_dir / "gromacs.log"
+    if not log_path.exists():
+        return False
+    return "Finished mdrun" in log_path.read_text(encoding="utf-8", errors="replace")
 
 
 def _tail_text_file(path: Path, max_lines: int = 80) -> str:
