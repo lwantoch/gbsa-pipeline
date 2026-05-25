@@ -27,7 +27,8 @@ def _assert_gromacs_process_call(
     gromacs_factory: Mock,
     system: Mock,
     protocol: Mock,
-    work_dir: Path | None = None,
+    ignore_warnings: bool = True,
+    work_dir: Path | str | None = None,
 ) -> None:
     """Assert that a BioSimSpace GROMACS process was built for a system.
 
@@ -51,6 +52,7 @@ def _assert_gromacs_process_call(
         assert kwargs["system"] is system
 
     assert kwargs["protocol"] is protocol
+    assert kwargs.get("ignore_warnings") == ignore_warnings
 
     if work_dir is None:
         assert "work_dir" not in kwargs
@@ -93,6 +95,7 @@ def test_run_minimization_builds_bss_process_and_returns_minimized_system(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=input_system,
+        protocol=minimization_protocol,
         ignore_warnings=True,
         work_dir=str(tmp_path),
     )
@@ -133,6 +136,7 @@ def test_run_minimization_omits_work_dir_when_not_provided(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=input_system,
+        protocol=minimization_protocol,
         ignore_warnings=True,
     )
     process.start.assert_called_once_with()
@@ -185,6 +189,7 @@ def test_run_heating_builds_bss_process_and_returns_equilibrated_system(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=minimized_system,
+        protocol=heating_protocol,
         ignore_warnings=True,
         work_dir=str(tmp_path),
     )
@@ -235,6 +240,7 @@ def test_run_heating_omits_work_dir_when_not_provided(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=minimized_system,
+        protocol=heating_protocol,
         ignore_warnings=True,
     )
     process.start.assert_called_once_with()
@@ -286,6 +292,7 @@ def test_run_npt_equilibration_builds_bss_process_and_returns_equilibrated_syste
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=heated_system,
+        protocol=equilibration_protocol,
         ignore_warnings=True,
         work_dir=str(tmp_path),
     )
@@ -335,6 +342,7 @@ def test_run_npt_equilibration_omits_work_dir_when_not_provided(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=heated_system,
+        protocol=equilibration_protocol,
         ignore_warnings=True,
     )
     process.start.assert_called_once_with()
@@ -384,6 +392,7 @@ def test_run_production_builds_bss_process_and_returns_production_system(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=equilibrated_system,
+        protocol=production_protocol,
         ignore_warnings=True,
         work_dir=str(tmp_path),
     )
@@ -432,6 +441,7 @@ def test_run_production_omits_work_dir_when_not_provided(
     _assert_gromacs_process_call(
         gromacs_factory=gromacs_factory,
         system=equilibrated_system,
+        protocol=production_protocol,
         ignore_warnings=True,
     )
     process.start.assert_called_once_with()
