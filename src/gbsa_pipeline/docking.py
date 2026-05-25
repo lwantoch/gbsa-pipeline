@@ -28,6 +28,7 @@ from rdkit.Chem import AllChem, rdmolops, rdMolTransforms
 from rdkit.Chem.rdDistGeom import EmbedMolecule
 from rdkit.Chem.rdForceFieldHelpers import UFFOptimizeMolecule
 from rdkit.Geometry.rdGeometry import Point3D
+from scipy.spatial import cKDTree
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -834,6 +835,114 @@ def _group_water_residues(
 
     _flush()
     return groups
+
+
+# ---------------------------------------------------------------------------
+# Crystal-water docking: public API
+# ---------------------------------------------------------------------------
+
+
+def select_docking_crystal_waters(
+    crystal_waters_pdb: Path,
+    box: DockingBox,
+    ligand_sdf: Path,
+    receptor_pdb: Path,
+    output_pdb: Path,
+    *,
+    ligand_cutoff_angstrom: float = 5.0,
+    receptor_clash_cutoff_angstrom: float = 2.2,
+) -> tuple[Path | None, list[str]]:
+    """Select crystal waters suitable for inclusion in the docking receptor.
+
+    A water oxygen must satisfy all three criteria to be kept:
+
+    1. Inside the docking box (binding-site spatial filter).
+    2. Within ``ligand_cutoff_angstrom`` of any ligand heavy atom — ensures
+       the water is in the binding site, not just anywhere in the box.
+    3. NOT within ``receptor_clash_cutoff_angstrom`` of any receptor heavy atom
+       — discards waters with impossible crystal-packing contacts.
+
+    Returns ``(path_to_selected_pdb, [retained_residue_ids])``.
+    The path is ``None`` when no waters survive all three filters.
+    """
+    if not crystal_waters_pdb.exists():
+        return None, []
+
+    groups = _group_water_residues(crystal_waters_pdb)
+    if not groups:
+        return None, []
+
+    # --- Build spatial indices ---
+    lig_coords = _pose_heavy_atom_coords(ligand_sdf)
+    rec_coords = _pdb_heavy_atom_coords(receptor_pdb)
+
+    lig_tree = cKDTree(lig_coords) if lig_coords.size > 0 else None
+    rec_tree = cKDTree(rec_coords) if rec_coords.size > 0 else None
+
+    # --- Docking box bounds ---
+    cx, cy, cz = box.center
+    hx, hy, hz = box.size[0] / 2.0, box.size[1] / 2.0, box.size[2] / 2.0
+
+    surviving_lines: list[str] = []
+    retained_ids: list[str] = []
+
+    for res_id, lines, ow in groups:
+        if ow is None:
+            continue
+
+        # 1. Inside box
+        if not (cx - hx <= ow[0] <= cx + hx and cy - hy <= ow[1] <= cy + hy and cz - hz <= ow[2] <= cz + hz):
+            continue
+
+        # 2. Near ligand
+        if lig_tree is not None:
+            hits = lig_tree.query_ball_point(ow, r=ligand_cutoff_angstrom)
+            if not hits:
+                continue
+
+        # 3. No receptor clash
+        if rec_tree is not None:
+            hits = rec_tree.query_ball_point(ow, r=receptor_clash_cutoff_angstrom)
+            if hits:
+                LOGGER.debug(
+                    "Crystal water %s discarded: clash with receptor (%.2f Å cutoff).",
+                    res_id,
+                    receptor_clash_cutoff_angstrom,
+                )
+                continue
+
+        surviving_lines.extend(lines)
+        retained_ids.append(res_id)
+
+    if not surviving_lines:
+        LOGGER.debug("No crystal waters survived selection (box + ligand proximity + clash filter).")
+        return None, []
+
+    output_pdb.parent.mkdir(parents=True, exist_ok=True)
+    output_pdb.write_text("\n".join(surviving_lines) + "\nEND\n", encoding="utf-8")
+    LOGGER.info("Selected %d crystal waters for docking: %s", len(retained_ids), retained_ids)
+    return output_pdb, retained_ids
+
+
+def prepare_receptor_with_crystal_waters(
+    receptor_pdb: Path,
+    crystal_waters_pdb: Path,
+    output_pdb: Path,
+) -> Path:
+    """Merge selected crystal waters into a receptor PDB for docking.
+
+    Waters are appended after the protein records so Meeko and Vina treat them
+    as part of the rigid receptor.
+    """
+    protein_lines = [
+        line for line in receptor_pdb.read_text(encoding="utf-8").splitlines() if not line.startswith(("TER", "END"))
+    ]
+    water_lines = [
+        line for line in crystal_waters_pdb.read_text(encoding="utf-8").splitlines() if not line.startswith("END")
+    ]
+    output_pdb.parent.mkdir(parents=True, exist_ok=True)
+    output_pdb.write_text("\n".join(protein_lines + water_lines) + "\nEND\n", encoding="utf-8")
+    return output_pdb
 
 
 class VinaEngine:
