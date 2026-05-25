@@ -1023,6 +1023,119 @@ def validate_docked_pose(
     )
 
 
+def dock_with_and_without_crystal_waters(
+    engine: VinaEngine,
+    request: DockingRequest,
+    crystal_waters_pdb: Path | None,
+    ligand_sdf: Path,
+    work_dir: Path,
+    *,
+    use_crystal_waters: bool = True,
+    ligand_cutoff_angstrom: float = 5.0,
+    receptor_clash_cutoff_angstrom: float = 2.2,
+) -> DockingManifest:
+    """Run Vina twice — without and with selected active-site crystal waters.
+
+    Crystal water selection applies three filters: inside docking box, within
+    ``ligand_cutoff_angstrom`` of a ligand heavy atom, and not clashing with
+    the receptor.  Set ``use_crystal_waters=False`` to skip the second run
+    entirely (useful for debugging MD stability without crystal water influence).
+
+    The receptor in ``request`` must be a ``.pdb`` file so the water-augmented
+    version can be assembled.  Both docked poses are validated post-hoc for
+    ligand/protein/water clashes and water bridges.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    def _best_score(result: DockingResult) -> float | None:
+        return next((p.score for p in result.poses if p.score is not None), None)
+
+    def _best_pose_sdf(result: DockingResult) -> Path | None:
+        best = next((p for p in result.poses if p.rank == 1), None)
+        return best.pose_path if best is not None else None
+
+    # --- Run 1: no crystal waters -------------------------------------------
+    # Use a dedicated subdirectory so Run 2 output files never overwrite Run 1.
+    run1_dir = work_dir / "no_water"
+    request_no_water = request.model_copy(update={"workdir": run1_dir})
+    result_no_water = engine.dock(request_no_water)
+    score_no_water = _best_score(result_no_water)
+    pose_no_water = _best_pose_sdf(result_no_water)
+    val_no_water = validate_docked_pose(pose_no_water, request.receptor) if pose_no_water is not None else None
+
+    # --- Select crystal waters ----------------------------------------------
+    def _early_return(val: DockingValidation | None) -> DockingManifest:
+        return DockingManifest(
+            without_waters=result_no_water,
+            with_waters=None,
+            score_without=score_no_water,
+            score_with=None,
+            retained_water_ids=[],
+            receptor_without_waters=request.receptor,
+            receptor_with_waters=None,
+            validation_without=val,
+            validation_with=None,
+        )
+
+    if not use_crystal_waters or crystal_waters_pdb is None or not crystal_waters_pdb.exists():
+        return _early_return(val_no_water)
+
+    if request.receptor.suffix.lower() != ".pdb":
+        LOGGER.warning("dock_with_and_without_crystal_waters: receptor must be a .pdb file; skipping water run.")
+        return _early_return(val_no_water)
+
+    # Use the docked pose from Run 1 (PDBQT) for crystal water proximity filter so
+    # that waters are selected based on the actual binding-site position of the
+    # ligand, not its arbitrary pre-docking embedding geometry.
+    ligand_ref = pose_no_water if (pose_no_water is not None and pose_no_water.exists()) else ligand_sdf
+
+    selected_pdb = work_dir / "selected_crystal_waters.pdb"
+    selected_path, retained_ids = select_docking_crystal_waters(
+        crystal_waters_pdb,
+        request.box,
+        ligand_ref,
+        request.receptor,
+        selected_pdb,
+        ligand_cutoff_angstrom=ligand_cutoff_angstrom,
+        receptor_clash_cutoff_angstrom=receptor_clash_cutoff_angstrom,
+    )
+
+    if selected_path is None:
+        return _early_return(val_no_water)
+
+    # --- Run 2: receptor + selected crystal waters --------------------------
+    receptor_with_waters = work_dir / "receptor_with_crystal_waters.pdb"
+    prepare_receptor_with_crystal_waters(request.receptor, selected_path, receptor_with_waters)
+
+    run2_dir = work_dir / "with_water"
+    request_with_waters = request.model_copy(update={"receptor": receptor_with_waters, "workdir": run2_dir})
+    result_with_water = engine.dock(request_with_waters)
+    score_with_water = _best_score(result_with_water)
+    pose_with_water = _best_pose_sdf(result_with_water)
+    val_with_water = (
+        validate_docked_pose(pose_with_water, request.receptor, selected_path) if pose_with_water is not None else None
+    )
+
+    LOGGER.info(
+        "Docking scores — without waters: %s | with waters: %s | retained: %s",
+        score_no_water,
+        score_with_water,
+        retained_ids,
+    )
+
+    return DockingManifest(
+        without_waters=result_no_water,
+        with_waters=result_with_water,
+        score_without=score_no_water,
+        score_with=score_with_water,
+        retained_water_ids=retained_ids,
+        receptor_without_waters=request.receptor,
+        receptor_with_waters=receptor_with_waters,
+        validation_without=val_no_water,
+        validation_with=val_with_water,
+    )
+
+
 class VinaEngine:
     """Minimal AutoDock Vina wrapper.
 
