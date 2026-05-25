@@ -503,6 +503,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     assert sd_minimized is not None
     assert any(sd_minimization_dir.iterdir())
+    assert (sd_minimization_dir / "success.txt").exists(), "SD minimization did not finish cleanly (no success.txt)"
 
     cg_minimized = run_minimization(
         sd_minimized,
@@ -512,6 +513,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     assert cg_minimized is not None
     assert any(cg_minimization_dir.iterdir())
+    assert (cg_minimization_dir / "success.txt").exists(), "CG minimization did not finish cleanly (no success.txt)"
 
     cleaned_for_relaxation = remove_clashing_solvent_waters(
         cg_minimized,
@@ -531,6 +533,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     assert solvent_relaxed is not None
     assert any(solvent_relax_dir.iterdir())
+    assert (solvent_relax_dir / "success.txt").exists(), "Solvent relaxation did not finish cleanly (no success.txt)"
 
     # BSS protocol runtime must match HEATING_PARAMS nsteps x dt to prevent BSS
     # from timing out before the MDP run finishes and passing a truncated
@@ -549,6 +552,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     assert nvt_restrained is not None
     assert any(nvt_restrained_dir.iterdir())
+    assert (nvt_restrained_dir / "success.txt").exists(), "NVT heating did not finish cleanly (no success.txt)"
 
     nvt_res_cpt = nvt_restrained_dir / "gromacs.cpt"
     npt_restrained = run_npt_equilibration(
@@ -562,6 +566,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     assert npt_restrained is not None
     assert any(npt_restrained_dir.iterdir())
+    assert (npt_restrained_dir / "success.txt").exists(), "NPT restrained did not finish cleanly (no success.txt)"
 
     npt_res_cpt = npt_restrained_dir / "gromacs.cpt"
     npt_unrestrained = run_npt_equilibration(
@@ -575,6 +580,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     assert npt_unrestrained is not None
     assert any(npt_unrestrained_dir.iterdir())
+    assert (npt_unrestrained_dir / "success.txt").exists(), "NPT unrestrained did not finish cleanly (no success.txt)"
 
     npt_cpt = npt_unrestrained_dir / "gromacs.cpt"
     production = run_production(
@@ -587,6 +593,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
 
     assert production is not None
     assert any(production_dir.iterdir())
+    assert (production_dir / "success.txt").exists(), "Production MD did not finish cleanly (no success.txt)"
 
     # ── GBSA ─────────────────────────────────────────────────────────────────
     # gmx_MMPBSA is optional — skip gracefully if not installed.
