@@ -254,6 +254,11 @@ def _write_crystal_waters_pdb(protein_pdb: Path, output_pdb: Path) -> Path | Non
     header records into the water-only file. ``None`` is returned when no water
     records are present, and an old generated file is removed to avoid stale
     artefacts in persistent integration-test folders.
+
+    Clash filtering (removing waters that overlap with protein/ligand heavy atoms)
+    is intentionally left to the OpenMM solvation step
+    (``_restore_crystal_waters_before_solvation`` in ``solvation_openmm.py``),
+    which uses OpenMM topology to do the check correctly.
     """
     water_lines = [
         line for line in protein_pdb.read_text(encoding="utf-8").splitlines() if _is_crystal_water_pdb_record(line)
