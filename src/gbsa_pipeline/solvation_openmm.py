@@ -39,10 +39,12 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import IO, TYPE_CHECKING, Any
 
+import numpy as np
 import parmed as pmd
 from openmm import Vec3
 from openmm import unit as mm_unit
 from openmm.app import ForceField, Modeller, NoCutoff, PDBFile
+from scipy.spatial import cKDTree
 
 from gbsa_pipeline.solvation_box import BoxShape, SolvationParams, WaterModel
 
@@ -384,24 +386,26 @@ def _restore_crystal_waters_before_solvation(
     water_modeller.addHydrogens(forcefield)
     atoms_after = water_modeller.topology.getNumAtoms()
 
-    # Build a list of existing heavy-atom positions (protein + ligand) in nm.
+    # Build an array of existing heavy-atom positions (protein + ligand) in nm.
     existing_positions = list(modeller.positions.value_in_unit(mm_unit.nanometer))
-    existing_heavy: list[tuple[float, float, float]] = []
-    for atom, pos in zip(modeller.topology.atoms(), existing_positions):
-        if atom.element is not None and atom.element.symbol != "H":
-            existing_heavy.append(pos)
+    existing_heavy = np.array(
+        [
+            pos
+            for atom, pos in zip(modeller.topology.atoms(), existing_positions)
+            if atom.element is not None and atom.element.symbol != "H"
+        ]
+    )
 
     # Identify which water residues (by oxygen position) clash with existing atoms.
     clashing_residues: set[Any] = set()
-    water_positions_nm = list(water_modeller.positions.value_in_unit(mm_unit.nanometer))
-    for atom, pos in zip(water_modeller.topology.atoms(), water_positions_nm):
-        if atom.element is not None and atom.element.symbol == "O":
-            ox, oy, oz = pos
-            for ex, ey, ez in existing_heavy:
-                d2 = (ox - ex) ** 2 + (oy - ey) ** 2 + (oz - ez) ** 2
-                if d2 < _CLASH_CUTOFF_NM**2:
+    if existing_heavy.size > 0:
+        tree = cKDTree(existing_heavy)
+        water_positions_nm = list(water_modeller.positions.value_in_unit(mm_unit.nanometer))
+        for atom, pos in zip(water_modeller.topology.atoms(), water_positions_nm):
+            if atom.element is not None and atom.element.symbol == "O":
+                hits = tree.query_ball_point(pos, r=_CLASH_CUTOFF_NM)
+                if hits:
                     clashing_residues.add(atom.residue)
-                    break
 
     if clashing_residues:
         logger.debug(
