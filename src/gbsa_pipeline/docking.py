@@ -719,7 +719,7 @@ _WATER_RESNAMES: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL
 class DockingValidation:
     """Post-docking geometry checks for one docked pose.
 
-    All distances are in Å.  Each entry in the clash lists is a
+    All distances are in A.  Each entry in the clash lists is a
     ``(description, distance)`` tuple; bridge entries are
     ``(water_res_id, ligand_description, protein_description, lig_dist, prot_dist)``.
     """
@@ -764,7 +764,7 @@ def _pdb_heavy_atom_coords(
     *,
     exclude_residues: frozenset[str] = _WATER_RESNAMES,
 ) -> np.ndarray:
-    """Return (N, 3) array of non-hydrogen, non-water PDB atom coordinates in Å."""
+    """Return (N, 3) array of non-hydrogen, non-water PDB atom coordinates in A."""
     coords: list[list[float]] = []
     for line in pdb_path.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line.startswith(("ATOM  ", "HETATM")):
@@ -783,7 +783,7 @@ def _pdb_heavy_atom_coords(
 
 
 def _sdf_heavy_atom_coords(sdf_path: Path) -> np.ndarray:
-    """Return (N, 3) array of heavy-atom coordinates in Å from the first SDF conformer."""
+    """Return (N, 3) array of heavy-atom coordinates in A from the first SDF conformer."""
     mol = Chem.MolFromMolFile(str(sdf_path), removeHs=True, sanitize=False)
     if mol is None or mol.GetNumConformers() == 0:
         return np.empty((0, 3))
@@ -792,7 +792,7 @@ def _sdf_heavy_atom_coords(sdf_path: Path) -> np.ndarray:
 
 
 def _pose_heavy_atom_coords(pose_path: Path) -> np.ndarray:
-    """Return (N, 3) heavy-atom coordinates for a docked pose in Å.
+    """Return (N, 3) heavy-atom coordinates for a docked pose in A.
 
     Accepts SDF/MOL (parsed with RDKit) or PDB/PDBQT (parsed column-by-column).
     PDBQT from Vina uses standard PDB coordinate columns, so the same parser
@@ -905,7 +905,7 @@ def select_docking_crystal_waters(
             hits = rec_tree.query_ball_point(ow, r=receptor_clash_cutoff_angstrom)
             if hits:
                 LOGGER.debug(
-                    "Crystal water %s discarded: clash with receptor (%.2f Å cutoff).",
+                    "Crystal water %s discarded: clash with receptor (%.2f A cutoff).",
                     res_id,
                     receptor_clash_cutoff_angstrom,
                 )
@@ -943,6 +943,84 @@ def prepare_receptor_with_crystal_waters(
     output_pdb.parent.mkdir(parents=True, exist_ok=True)
     output_pdb.write_text("\n".join(protein_lines + water_lines) + "\nEND\n", encoding="utf-8")
     return output_pdb
+
+
+def validate_docked_pose(
+    pose_sdf: Path,
+    receptor_pdb: Path,
+    retained_waters_pdb: Path | None = None,
+    *,
+    clash_cutoff_angstrom: float = 2.0,
+    bridge_min_angstrom: float = 2.6,
+    bridge_max_angstrom: float = 3.2,
+) -> DockingValidation:
+    """Check clashes and water bridges for a docked pose.
+
+    Uses ``cKDTree`` for all distance queries.  A "water bridge" is a crystal
+    water whose oxygen is within ``bridge_min``-``bridge_max`` A of BOTH a
+    ligand heavy atom AND a receptor heavy atom simultaneously.
+    """
+    lig_coords = _pose_heavy_atom_coords(pose_sdf)
+    rec_coords = _pdb_heavy_atom_coords(receptor_pdb)
+
+    lig_protein_clashes: list[tuple[str, float]] = []
+    lig_water_clashes: list[tuple[str, float]] = []
+    water_protein_clashes: list[tuple[str, float]] = []
+    water_bridges: list[tuple[str, str, str, float, float]] = []
+
+    rec_tree = cKDTree(rec_coords) if rec_coords.size > 0 else None
+
+    # Ligand-protein clashes
+    if lig_coords.size > 0 and rec_tree is not None:
+        for i, lpos in enumerate(lig_coords):
+            hits = rec_tree.query_ball_point(lpos, r=clash_cutoff_angstrom)
+            for j in hits:
+                d = float(np.linalg.norm(lpos - rec_coords[j]))
+                lig_protein_clashes.append((f"lig_atom{i}<->rec_atom{j}", d))
+
+    # Crystal water checks
+    if retained_waters_pdb is not None and retained_waters_pdb.exists():
+        water_groups = _group_water_residues(retained_waters_pdb)
+        lig_tree = cKDTree(lig_coords) if lig_coords.size > 0 else None
+
+        for res_id, _lines, ow in water_groups:
+            if ow is None:
+                continue
+
+            # Water-protein clashes
+            if rec_tree is not None:
+                hits = rec_tree.query_ball_point(ow, r=clash_cutoff_angstrom)
+                for j in hits:
+                    d = float(np.linalg.norm(np.array(ow) - rec_coords[j]))
+                    water_protein_clashes.append((f"HOH{res_id}<->rec_atom{j}", d))
+
+            # Ligand-water clashes
+            if lig_tree is not None:
+                hits = lig_tree.query_ball_point(ow, r=clash_cutoff_angstrom)
+                for i in hits:
+                    d = float(np.linalg.norm(np.array(ow) - lig_coords[i]))
+                    lig_water_clashes.append((f"HOH{res_id}<->lig_atom{i}", d))
+
+            # Water bridges: OW within bridge range of BOTH ligand and protein
+            if lig_tree is not None and rec_tree is not None:
+                near_lig = lig_tree.query_ball_point(ow, r=bridge_max_angstrom)
+                near_rec = rec_tree.query_ball_point(ow, r=bridge_max_angstrom)
+                for i in near_lig:
+                    dl = float(np.linalg.norm(np.array(ow) - lig_coords[i]))
+                    if dl < bridge_min_angstrom:
+                        continue
+                    for j in near_rec:
+                        dr = float(np.linalg.norm(np.array(ow) - rec_coords[j]))
+                        if dr < bridge_min_angstrom:
+                            continue
+                        water_bridges.append((f"HOH{res_id}", f"lig_atom{i}", f"rec_atom{j}", dl, dr))
+
+    return DockingValidation(
+        ligand_protein_clashes=lig_protein_clashes,
+        ligand_water_clashes=lig_water_clashes,
+        water_protein_clashes=water_protein_clashes,
+        water_bridges=water_bridges,
+    )
 
 
 class VinaEngine:
