@@ -29,3 +29,7 @@ __pycache__/
 
 # Project stuff and testing
 tst/
+
+# Large optional testdata (generate locally before running integration tests)
+tests/testdata/mmbsa/
+tests/testdata/docking/solv.pdb
