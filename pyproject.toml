@@ -95,6 +95,7 @@ vina = ">=1.2.6,<2"
 gemmi = ">=0.6.7,<0.7"
 pytest = ">=9.0.3,<10"
 pytest-cov = ">=7.1.0,<8"
+gmx_mmpbsa = ">=1.5.0.3,<2"
 
 [tool.pixi.pypi-dependencies]
 gbsa-pipeline = { path = ".", editable = true }
