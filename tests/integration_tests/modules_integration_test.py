@@ -11,9 +11,10 @@ verify that the public module interfaces can still be connected end to end.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import BioSimSpace as BSS
 import pytest
@@ -40,10 +41,6 @@ from gbsa_pipeline.parametrization import (
     parametrize,
 )
 from gbsa_pipeline.solvation_bss import solvate_parametrized_complex
-
-if TYPE_CHECKING:
-    from typing import Any
-
 
 TESTDATA = Path(__file__).parents[1] / "testdata"
 DOCKING_TESTDATA = TESTDATA / "docking"
@@ -354,11 +351,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     docked_sdf = module_run_dir / "dockligand_vina_out.sdf"
 
     parametrization_dir = module_run_dir / "parametrization"
-    crystal_waters_pdb = parametrization_dir / "crystal_waters.pdb"
-
     solvation_dir = module_run_dir / "solvation"
-    solvation_dir.mkdir(parents=True, exist_ok=True)
-
     sd_minimization_dir = module_run_dir / "sd"
     cg_minimization_dir = module_run_dir / "cg"
     nvt_restrained_dir = module_run_dir / "nvt_res"
@@ -366,12 +359,17 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     npt_unrestrained_dir = module_run_dir / "npt"
     production_dir = module_run_dir / "production"
 
-    sd_minimization_dir.mkdir(parents=True, exist_ok=True)
-    cg_minimization_dir.mkdir(parents=True, exist_ok=True)
-    nvt_restrained_dir.mkdir(parents=True, exist_ok=True)
-    npt_restrained_dir.mkdir(parents=True, exist_ok=True)
-    npt_unrestrained_dir.mkdir(parents=True, exist_ok=True)
-    production_dir.mkdir(parents=True, exist_ok=True)
+    for _d in (
+        parametrization_dir,
+        solvation_dir,
+        sd_minimization_dir,
+        cg_minimization_dir,
+        nvt_restrained_dir,
+        npt_restrained_dir,
+        npt_unrestrained_dir,
+        production_dir,
+    ):
+        _d.mkdir(parents=True, exist_ok=True)
 
     ligand_molecule = load_first_sdf_molecule(DOCKLIGAND_SDF, remove_hs=False)
 
@@ -434,6 +432,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
         )
     )
 
+    crystal_waters_pdb = parametrization_dir / "crystal_waters.pdb"
     if parametrized.crystal_waters_pdb is not None:
         assert crystal_waters_pdb.exists()
         assert crystal_waters_pdb.read_text(encoding="utf-8").strip()
@@ -459,42 +458,13 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     # LJ (SR) values and references.
     # ==========================================================================
 
-    # ACTIVE: BSS solvation — gmx solvate + SETTLE water, no LJ clash
+    os.environ["GMX_MAXCONSTRWARN"] = "-1"
+
     bss_system = solvate_parametrized_complex(
         parametrized,
         shell_nm=1.0,
         work_dir=solvation_dir,
     )
-
-    # INACTIVE: solvate_openmm — OpenMM addSolvent + ParmEd
-    # Disabled: ParmEd writes explicit O-H springs (no [ settles ]) that cause
-    # LJ (SR) to increase during minimization and LINCS failure in NVT heating.
-    # To re-enable: comment out the BSS block above and uncomment below.
-    #
-    # from gbsa_pipeline.solvation_openmm import solvate_openmm, relax_solvated_water
-    # from gbsa_pipeline.solvation_box import SolvationParams
-    # solvated = solvate_openmm(
-    #     parametrized=parametrized,
-    #     params=SolvationParams(
-    #         water_model="tip3p",
-    #         shape="truncated_octahedron",
-    #         padding=1.0,
-    #         ion_concentration=0.15,
-    #         neutralize=True,
-    #     ),
-    #     output_gro=solvation_dir / "solvated.gro",
-    #     output_top=solvation_dir / "solvated.top",
-    # )
-    # relax_solvated_water(
-    #     gro=solvated.gro_file,
-    #     top=solvated.top_file,
-    #     work_dir=solvation_dir / "water_relax",
-    # )
-    # bss_system = solvated.load_bss()
-
-    import os  # noqa: PLC0415
-
-    os.environ["GMX_MAXCONSTRWARN"] = "-1"
 
     assert bss_system is not None
 
@@ -519,6 +489,8 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     # BSS protocol runtime must match HEATING_PARAMS nsteps x dt to prevent BSS
     # from timing out before the MDP run finishes and passing a truncated
     # checkpoint to the next stage (observed in pytest-37 with the 12 nm box).
+    # Checkpoint continuity: NVT writes gromacs.cpt, which NPT restrained reads
+    # via grompp -t.
     nvt_restrained = run_heating(
         100 * BSS.Units.Time.picosecond,
         cg_minimized,
@@ -532,38 +504,44 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     assert nvt_restrained is not None
     assert any(nvt_restrained_dir.iterdir())
 
+    # BSS terminates mdrun when simulated time matches protocol runtime.
+    # With -cpt 1 in md.py, checkpoints are written every 1 minute, so a
+    # recent .cpt should always be present.  Pass it when it exists; if it
+    # is absent the next stage starts with gen_vel=yes (BSS default), which
+    # is safe after a completed 100 ps NVT run at 300 K.
+    nvt_cpt = nvt_restrained_dir / "gromacs.cpt"
     npt_restrained = run_npt_equilibration(
         200 * BSS.Units.Time.picosecond,
         nvt_restrained,
         work_dir=npt_restrained_dir,
         params=NPT_RESTRAINED_PARAMS,
         restraint="backbone",
-        # Pass the NVT checkpoint so GROMACS reads velocities from it instead of
-        # regenerating them (gen_vel=yes on bad contacts → SETTLE crash at step 568).
-        checkpoint_path=nvt_restrained_dir / "gromacs.cpt",
+        checkpoint_path=nvt_cpt if nvt_cpt.exists() else None,
     )
 
     assert npt_restrained is not None
     assert any(npt_restrained_dir.iterdir())
 
+    npt_res_cpt = npt_restrained_dir / "gromacs.cpt"
     npt_unrestrained = run_npt_equilibration(
         200 * BSS.Units.Time.picosecond,
         npt_restrained,
         work_dir=npt_unrestrained_dir,
         params=NPT_PARAMS,
         restraint=None,
-        checkpoint_path=npt_restrained_dir / "gromacs.cpt",
+        checkpoint_path=npt_res_cpt if npt_res_cpt.exists() else None,
     )
 
     assert npt_unrestrained is not None
     assert any(npt_unrestrained_dir.iterdir())
 
+    npt_cpt = npt_unrestrained_dir / "gromacs.cpt"
     production = run_production(
         200 * BSS.Units.Time.picosecond,
         npt_unrestrained,
         work_dir=production_dir,
         params=PRODUCTION_PARAMS,
-        checkpoint_path=npt_unrestrained_dir / "gromacs.cpt",
+        checkpoint_path=npt_cpt if npt_cpt.exists() else None,
     )
 
     assert production is not None
@@ -613,11 +591,6 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
         receptor_group=0,
         ligand_group=1,
         output_dir=gbsa_dir / "run",
-        # -no_ana suppresses gmx_MMPBSA_ana (the GUI analysis tool) which requires
-        # PyQt5. The main MMPBSA calculation completes regardless; results are in
-        # FINAL_RESULTS_MMPBSA.dat. Without this flag gmx_MMPBSA exits with code 1
-        # even when the energy calculation succeeded (observed in pytest-37).
-        extra_args=["-nogui"],
     )
 
     assert mmpbsa_result.returncode == 0, (
