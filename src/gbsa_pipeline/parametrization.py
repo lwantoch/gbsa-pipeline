@@ -53,8 +53,10 @@ class ParametrizationConfig(BaseModel):
     ligand_ff: LigandFF = LigandFF.GAFF2
     charge_method: ChargeMethod = ChargeMethod.AM1BCC
     extra_ff_files: tuple[Path, ...] = ()
+    frcmod_files: tuple[Path, ...] = ()
+    residue_mol2s: tuple[Path, ...] = ()
 
-    @field_validator("extra_ff_files", mode="before")
+    @field_validator("extra_ff_files", "frcmod_files", "residue_mol2s", mode="before")
     @classmethod
     def _check_extra_ff_files(cls, paths: Any) -> tuple[Path, ...]:
         result = tuple(Path(p) for p in paths)
@@ -112,6 +114,7 @@ class ParametrizationInput(BaseModel):
 
     protein_pdb: Path
     ligand_sdf: Path
+    cofactor_sdfs: tuple[Path, ...] = ()
     config: ParametrizationConfig = Field(default_factory=ParametrizationConfig)
     net_charge: int | None = None
     work_dir: Path | None = None
@@ -122,6 +125,15 @@ class ParametrizationInput(BaseModel):
         if not path.exists():
             raise ValueError(f"File not found: {path}")
         return path
+
+    @field_validator("cofactor_sdfs", mode="before")
+    @classmethod
+    def _check_cofactor_sdfs(cls, paths: Any) -> tuple[Path, ...]:
+        result = tuple(Path(p) for p in paths)
+        missing = [p for p in result if not p.exists()]
+        if missing:
+            raise ValueError("Co-factor SDF files not found: " + ", ".join(str(p) for p in missing))
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +179,7 @@ class ParametrisedComplex:
     forcefield: Any = field(default=None, hash=False, compare=False, repr=False)
     parmed_structure: Any = field(default=None, hash=False, compare=False, repr=False)
     crystal_waters_pdb: Path | None = None
+    n_cofactors: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +318,50 @@ def _remove_crystal_waters_from_modeller(pdb: PDBFile) -> Modeller:
     return modeller
 
 
+def prepare_cofactor_from_pdb(pdb_path: Path, output_sdf: Path) -> Path:
+    """Convert a co-factor PDB file to SDF, preserving 3-D coordinates.
+
+    Uses RDKit to parse the PDB (including CONECT records) and writes a single
+    SDF conformer.  The output SDF can then be passed to
+    :class:`ParametrizationInput` via ``cofactor_sdfs`` so the co-factor is
+    parametrized with GAFF charges and treated as part of the receptor in GBSA.
+
+    Parameters
+    ----------
+    pdb_path:
+        Path to the co-factor PDB file.
+    output_sdf:
+        Destination SDF path (parent directory created if absent).
+
+    Returns:
+    -------
+    Path
+        ``output_sdf`` after writing.
+
+    Raises:
+    ------
+    ValueError
+        If RDKit cannot parse the PDB file.
+    """
+    from rdkit import Chem  # noqa: PLC0415
+
+    mol = Chem.MolFromPDBFile(str(pdb_path), sanitize=True, removeHs=False)
+    if mol is None:
+        mol = Chem.MolFromPDBFile(str(pdb_path), sanitize=False, removeHs=False)
+        if mol is None:
+            raise ValueError(
+                f"RDKit could not parse co-factor PDB: {pdb_path}. "
+                "Ensure the file contains CONECT records for bond connectivity."
+            )
+        Chem.SanitizeMol(mol, catchErrors=True)
+
+    output_sdf.parent.mkdir(parents=True, exist_ok=True)
+    writer = Chem.SDWriter(str(output_sdf))
+    writer.write(mol)
+    writer.close()
+    return output_sdf
+
+
 def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     work_dir = inp.work_dir or Path(tempfile.mkdtemp(prefix="gbsa_param_"))
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -326,6 +383,25 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
         "Protein PDB loaded without crystal waters (%d atoms).",
         protein_modeller.topology.getNumAtoms(),
     )
+
+    # --- Co-factors (GAFF-parametrized, counted as receptor in GBSA) ------
+    cofactors: list[Molecule] = []
+    for sdf_path in inp.cofactor_sdfs:
+        logger.debug("Loading co-factor SDF: %s …", sdf_path)
+        cof = Molecule.from_file(str(sdf_path))
+        if not cof.conformers:
+            raise ValueError(
+                f"Co-factor SDF '{sdf_path}' contains no 3-D conformers. "
+                "Provide an SDF file with embedded 3-D coordinates."
+            )
+        cof.assign_partial_charges(
+            partial_charge_method=inp.config.charge_method.value,
+            normalize_partial_charges=True,
+            use_conformers=cof.conformers,
+        )
+        cofactors.append(cof)
+    if cofactors:
+        logger.debug("Loaded and charged %d co-factor(s).", len(cofactors))
 
     # --- Ligand --------------------------------------------------------
     logger.debug("Loading ligand SDF: %s …", inp.ligand_sdf)
@@ -355,6 +431,22 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     # --- Force field ---------------------------------------------------
     protein_xmls = _PROTEIN_FF_XML[inp.config.protein_ff]
     extra_xmls = [str(p) for p in inp.config.extra_ff_files]
+
+    if inp.config.frcmod_files or inp.config.residue_mol2s:
+        from gbsa_pipeline.frcmod_parametrization import AmberFFInput, build_amber_ff_xml  # noqa: PLC0415
+
+        amber_xml = build_amber_ff_xml(
+            AmberFFInput(
+                frcmod_files=inp.config.frcmod_files,
+                residue_mol2s=inp.config.residue_mol2s,
+                protein_ff=inp.config.protein_ff,
+                ligand_ff=inp.config.ligand_ff,
+                output_xml=work_dir / "amber_custom.xml",
+            )
+        )
+        logger.debug("Built custom AMBER XML from frcmod/mol2 → %s", amber_xml)
+        extra_xmls = [str(amber_xml), *extra_xmls]
+
     logger.debug(
         "Building force field (protein=%s, extra=%d files) …",
         inp.config.protein_ff.value,
@@ -364,19 +456,22 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     logger.debug("Force field built.")
 
     logger.debug(
-        "Registering GAFF template generator (%s) …",
+        "Registering GAFF template generator (%s, %d co-factor(s) + ligand) …",
         _GAFF_FF_VERSION[inp.config.ligand_ff],
+        len(cofactors),
     )
     gaff = GAFFTemplateGenerator(
-        molecules=[ligand],
+        molecules=[*cofactors, ligand],
         forcefield=_GAFF_FF_VERSION[inp.config.ligand_ff],
         cache=None,
     )
     forcefield.registerTemplateGenerator(gaff.generator)
     logger.debug("GAFF template generator registered.")
 
-    logger.debug("Combining protein+ligand topology …")
+    logger.debug("Combining protein + %d co-factor(s) + ligand topology …", len(cofactors))
     modeller = Modeller(protein_modeller.topology, protein_modeller.positions)
+    for cof in cofactors:
+        modeller.add(cof.to_topology().to_openmm(), cof.conformers[0].to_openmm())
     modeller.add(ligand.to_topology().to_openmm(), ligand.conformers[0].to_openmm())
     logger.debug("Combined dry topology: %d atoms.", modeller.topology.getNumAtoms())
 
@@ -407,6 +502,7 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
         forcefield=forcefield,
         parmed_structure=structure,
         crystal_waters_pdb=crystal_waters_pdb,
+        n_cofactors=len(cofactors),
     )
 
     cache_file = work_dir / "complex.pickle"
