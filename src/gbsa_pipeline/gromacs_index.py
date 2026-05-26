@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from io import TextIOWrapper
     from pathlib import Path
 
+    import sire.mol
     import sire.system
 
 
@@ -27,6 +28,8 @@ def write_index_from_system(
     protein: sire.mol.Molecule,
     ligand: sire.mol.Molecule,
     index_file: Path,
+    *,
+    cofactors: Sequence[sire.mol.Molecule] = (),
 ) -> None:
     """Write a GROMACS index file with Receptor and Ligand atom groups.
 
@@ -42,12 +45,18 @@ def write_index_from_system(
     numbers 0 and 1.  Raises ``RuntimeError`` if either molecule is not found
     in the system, to fail early rather than silently produce an incomplete
     index file.
+
+    Co-factors (e.g. FAD, heme, metal ions) are passed via ``cofactors``; their
+    atoms are appended to the ``[ Receptor ]`` group so gmx_MMPBSA treats them
+    as part of the receptor rather than the scored ligand.
+
     See the GROMACS index file format documentation at
     https://manual.gromacs.org/documentation/current/reference-manual/file-formats.html#ndx
     for the format specification.
     """
     protein_num = protein.number()
     ligand_num = ligand.number()
+    cofactor_nums = {mol.number() for mol in cofactors}
 
     receptor_atoms: list[int] = []
     ligand_atoms: list[int] = []
@@ -59,7 +68,7 @@ def write_index_from_system(
         start = atom_counter
         end = atom_counter + natoms
         num = mol.number()
-        if num == protein_num:
+        if num == protein_num or num in cofactor_nums:
             receptor_atoms.extend(range(start, end))
         elif num == ligand_num:
             ligand_atoms.extend(range(start, end))
