@@ -85,12 +85,15 @@ class AmberFFInput(BaseModel):
     Parameters
     ----------
     frcmod_files:
-        One or more AMBER frcmod files (e.g. from MCPB.py) that supply
-        custom bond, angle, dihedral, and LJ parameters.
+        One or more AMBER frcmod files that supply custom bond, angle,
+        dihedral, and LJ parameters — e.g. from MCPB.py for metal sites or
+        from antechamber/parmchk2 for non-standard amino acids with
+        recalculated RESP charges.
     residue_mol2s:
         Mol2 files for non-standard residues (e.g. metal-coordinating CYS/HIS
-        modified by MCPB.py, bare metal ions). Each file must contain exactly
-        one ``@<TRIPOS>MOLECULE`` block.
+        modified by MCPB.py, bare metal ions, or modified amino acids with
+        RESP partial charges). Each file must contain exactly one
+        ``@<TRIPOS>MOLECULE`` block.
     protein_ff:
         Protein force field. Determines which base AMBER parameter files are
         loaded (``parm19.dat + frcmod.ff14SB`` for FF14SB, etc.).
