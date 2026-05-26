@@ -166,6 +166,7 @@ def test_run_heating_builds_bss_process_and_returns_equilibrated_system(
     heating_protocol = Mock(name="heating_protocol")
     process = Mock(name="gromacs_process")
     process.getSystem.return_value = equilibrated_system
+    process.getConfig.return_value = []
 
     equilibration_factory = Mock(return_value=heating_protocol)
     gromacs_factory = Mock(return_value=process)
@@ -218,6 +219,7 @@ def test_run_heating_omits_work_dir_when_not_provided(
     heating_protocol = Mock(name="heating_protocol")
     process = Mock(name="gromacs_process")
     process.getSystem.return_value = equilibrated_system
+    process.getConfig.return_value = []
 
     equilibration_factory = Mock(return_value=heating_protocol)
     gromacs_factory = Mock(return_value=process)
@@ -269,6 +271,7 @@ def test_run_npt_equilibration_builds_bss_process_and_returns_equilibrated_syste
     equilibration_protocol = Mock(name="equilibration_protocol")
     process = Mock(name="gromacs_process")
     process.getSystem.return_value = equilibrated_system
+    process.getConfig.return_value = []
 
     equilibration_factory = Mock(return_value=equilibration_protocol)
     gromacs_factory = Mock(return_value=process)
@@ -320,6 +323,7 @@ def test_run_npt_equilibration_omits_work_dir_when_not_provided(
     equilibration_protocol = Mock(name="equilibration_protocol")
     process = Mock(name="gromacs_process")
     process.getSystem.return_value = equilibrated_system
+    process.getConfig.return_value = []
 
     equilibration_factory = Mock(return_value=equilibration_protocol)
     gromacs_factory = Mock(return_value=process)
@@ -371,6 +375,7 @@ def test_run_production_builds_bss_process_and_returns_production_system(
     production_protocol = Mock(name="production_protocol")
     process = Mock(name="gromacs_process")
     process.getSystem.return_value = production_system
+    process.getConfig.return_value = []
 
     production_factory = Mock(return_value=production_protocol)
     gromacs_factory = Mock(return_value=process)
@@ -421,6 +426,7 @@ def test_run_production_omits_work_dir_when_not_provided(
     production_protocol = Mock(name="production_protocol")
     process = Mock(name="gromacs_process")
     process.getSystem.return_value = production_system
+    process.getConfig.return_value = []
 
     production_factory = Mock(return_value=production_protocol)
     gromacs_factory = Mock(return_value=process)
