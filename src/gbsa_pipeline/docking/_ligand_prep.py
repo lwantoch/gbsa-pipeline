@@ -12,7 +12,7 @@ from rdkit.Chem import AllChem, rdmolops
 from rdkit.Chem.rdDistGeom import EmbedMolecule
 from rdkit.Chem.rdForceFieldHelpers import UFFOptimizeMolecule
 
-from gbsa_pipeline.docking._utils import _extract_pdbqt_string_from_meeko_result
+from gbsa_pipeline.docking._utils import _extract_pdbqt_string_from_meeko_result, _require_file
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,12 +39,6 @@ def assign_bond_orders_from_template_mol(
     Reference:
     https://www.rdkit.org/docs/source/rdkit.Chem.AllChem.html
     """
-    if template_mol is None:
-        raise ValueError("template_mol is None.")
-
-    if target_mol is None:
-        raise ValueError("target_mol is None.")
-
     template_no_h = Chem.RemoveHs(Chem.Mol(template_mol))
     target_no_h = Chem.RemoveHs(Chem.Mol(target_mol))
 
@@ -81,15 +75,9 @@ def export_pdbqt_to_sdf(
     for template-based repair, because a separate boolean flag would add a
     redundant and potentially contradictory state to this API.
     """
-    pdbqt_path = Path(pdbqt_path).resolve()
+    pdbqt_path = _require_file(Path(pdbqt_path), "PDBQT file")
     output_sdf = Path(output_sdf).resolve()
     output_sdf.parent.mkdir(parents=True, exist_ok=True)
-
-    if not pdbqt_path.exists():
-        raise FileNotFoundError(f"PDBQT file not found: {pdbqt_path}")
-
-    if not pdbqt_path.is_file():
-        raise ValueError(f"PDBQT path is not a file: {pdbqt_path}")
 
     pdbqt_molecule = PDBQTMolecule.from_file(str(pdbqt_path), skip_typing=True)
     raw_molecules = RDKitMolCreate.from_pdbqt_mol(pdbqt_molecule)
