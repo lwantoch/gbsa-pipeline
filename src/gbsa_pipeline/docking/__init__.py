@@ -18,8 +18,6 @@ to work without change.
 """
 
 from gbsa_pipeline.docking._crystal_waters import (
-    DockingManifest,
-    DockingValidation,
     dock_with_and_without_crystal_waters,
     select_docking_crystal_waters,
     validate_docked_pose,
@@ -33,8 +31,10 @@ from gbsa_pipeline.docking._models import (
     DockedPose,
     DockingBox,
     DockingEngine,
+    DockingManifest,
     DockingRequest,
     DockingResult,
+    DockingValidation,
 )
 from gbsa_pipeline.docking._mol_utils import (
     load_first_sdf_molecule,
