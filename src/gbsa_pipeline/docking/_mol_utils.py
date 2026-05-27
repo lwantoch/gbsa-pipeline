@@ -8,30 +8,15 @@ from typing import TYPE_CHECKING
 from rdkit import Chem
 from rdkit.Chem import rdMolTransforms
 
+from gbsa_pipeline.docking._utils import _require_file
+
 if TYPE_CHECKING:
     from rdkit.Geometry.rdGeometry import Point3D
 
 
 def load_first_sdf_molecule(path: Path, *, remove_hs: bool = False) -> Chem.Mol:
-    """Read the first valid molecule from an SDF file.
-
-    This helper exists so SDF loading behavior is centralized and consistent
-    instead of being rewritten at multiple call sites with slightly different
-    failure behavior.
-    The `path` parameter is required because this function is specifically about
-    reading one file from disk, while `remove_hs` controls whether RDKit should
-    strip hydrogens during import.
-    We are currently checking only that the file exists, is a file, and yields
-    a non-None first molecule, because this module expects single-ligand SDF
-    inputs rather than arbitrary multi-record chemistry archives.
-    """
-    path = Path(path).resolve()
-
-    if not path.exists():
-        raise FileNotFoundError(f"SDF file not found: {path}")
-
-    if not path.is_file():
-        raise ValueError(f"SDF path is not a file: {path}")
+    """Read the first valid molecule from an SDF file."""
+    path = _require_file(Path(path), "SDF file")
 
     supplier = Chem.SDMolSupplier(str(path), removeHs=remove_hs)
     molecule = supplier[0]
