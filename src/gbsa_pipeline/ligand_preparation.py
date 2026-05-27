@@ -7,6 +7,8 @@ import sire as sr
 from molvs import Standardizer
 from rdkit import Chem
 
+from gbsa_pipeline.mol_utils import load_first_sdf_molecule
+
 
 def load_ligand_sdf(sdf_path: PathLike | str) -> Chem.Mol:
     """Load the first molecule from an SDF file.
@@ -14,17 +16,7 @@ def load_ligand_sdf(sdf_path: PathLike | str) -> Chem.Mol:
     NOTE: RDKit reads a list of molecules from an SDF file.
     Only the first molecule is processed.
     """
-    path = Path(sdf_path)
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {sdf_path}")
-
-    molecule_list = Chem.SDMolSupplier(str(sdf_path), removeHs=False)
-
-    if len(molecule_list) == 0 or molecule_list[0] is None:
-        raise ValueError(f"No valid molecules found in {sdf_path}")
-
-    mol = molecule_list[0]
-    return mol
+    return load_first_sdf_molecule(Path(sdf_path), remove_hs=False)
 
 
 def ligand_standardizer(mol: Chem.Mol) -> Chem.Mol:

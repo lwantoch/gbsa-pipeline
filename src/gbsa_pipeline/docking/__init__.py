@@ -4,7 +4,6 @@ The docking subpackage is organised into focused modules:
 
 - :mod:`._models` — validated input/output dataclasses and the
   :class:`DockingEngine` Protocol.
-- :mod:`._mol_utils` — molecule loading, hydrogen removal, centroid helpers.
 - :mod:`._ligand_prep` — SMILES/RDKit → PDBQT preparation and PDBQT → SDF
   export with bond-order repair.
 - :mod:`._receptor_prep` — PDB → PDBQT conversion and crystal-water merging.
@@ -36,16 +35,12 @@ from gbsa_pipeline.docking._models import (
     DockingResult,
     DockingValidation,
 )
-from gbsa_pipeline.docking._mol_utils import (
-    load_first_sdf_molecule,
-    molecule_centroid,
-    remove_hydrogens_copy,
-)
 from gbsa_pipeline.docking._receptor_prep import (
     convert_receptor_pdb_to_pdbqt,
     prepare_receptor_with_crystal_waters,
 )
 from gbsa_pipeline.docking._vina import VinaEngine
+from gbsa_pipeline.mol_utils import load_first_sdf_molecule, molecule_centroid, remove_hydrogens_copy
 
 __all__ = [
     "DockedPose",

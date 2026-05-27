@@ -1,4 +1,4 @@
-"""Molecule utilities: SDF loading, hydrogen removal, centroid computation."""
+"""General RDKit molecule utilities: SDF loading, hydrogen removal, centroid, bond-order repair."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rdkit import Chem
-from rdkit.Chem import rdMolTransforms
+from rdkit.Chem import AllChem, rdmolops, rdMolTransforms
 
 from gbsa_pipeline.docking._utils import _require_file
 
@@ -28,17 +28,7 @@ def load_first_sdf_molecule(path: Path, *, remove_hs: bool = False) -> Chem.Mol:
 
 
 def remove_hydrogens_copy(molecule: Chem.Mol) -> Chem.Mol:
-    """Return a copy of a molecule with hydrogens removed.
-
-    This helper exists because pose and chemistry comparisons are often more
-    stable on the heavy-atom graph than on a hydrogen-complete representation.
-    The `molecule` parameter is required because callers may want to normalize
-    molecules coming from templates, raw exports, or rebuilt structures in the
-    same way before comparison.
-    We are currently using RDKit's hydrogen removal on a copied molecule so the
-    original input object stays unchanged, which is important when the same
-    molecule is reused later for export or debugging.
-    """
+    """Return a copy of a molecule with hydrogens removed."""
     return Chem.RemoveHs(Chem.Mol(molecule))
 
 
@@ -50,12 +40,8 @@ def molecule_centroid(
 ) -> Point3D:
     """Compute the geometric centroid of one molecular conformer.
 
-    This helper exists because pose-comparison tests need a compact spatial
-    summary without introducing a separate alignment step.
-    The `molecule` parameter provides the coordinates, while `conf_id` allows
-    callers to select a specific conformer when needed.
-    We validate the requested conformer before computing the centroid so callers
-    get a clear error when they ask for a conformer that is not present.
+    Raises ``ValueError`` when the molecule has no conformers or the requested
+    ``conf_id`` is not present.
     """
     conformer_ids = {conformer.GetId() for conformer in molecule.GetConformers()}
 
@@ -71,3 +57,36 @@ def molecule_centroid(
         molecule.GetConformer(conf_id),
         ignoreHs=ignore_hs,
     )
+
+
+def assign_bond_orders_from_template(
+    template_mol: Chem.Mol,
+    target_mol: Chem.Mol,
+    *,
+    add_hydrogens: bool = False,
+) -> Chem.Mol:
+    """Repair target bond orders from a template while preserving target geometry.
+
+    Strips hydrogens from both molecules, applies
+    ``AllChem.AssignBondOrdersFromTemplate``, then infers stereochemistry from
+    the existing 3D coordinates.  Optionally re-adds hydrogens with coordinates.
+
+    Raises ``RuntimeError`` when RDKit cannot match the template to the target
+    (e.g. different heavy-atom graph).
+    """
+    template_no_h = Chem.RemoveHs(Chem.Mol(template_mol))
+    target_no_h = Chem.RemoveHs(Chem.Mol(target_mol))
+
+    try:
+        rebuilt = AllChem.AssignBondOrdersFromTemplate(template_no_h, target_no_h)
+    except Exception as exc:
+        raise RuntimeError(
+            "RDKit AssignBondOrdersFromTemplate failed. Template and target molecule likely do not match."
+        ) from exc
+
+    rdmolops.AssignStereochemistryFrom3D(rebuilt)
+
+    if add_hydrogens:
+        rebuilt = Chem.AddHs(rebuilt, addCoords=True)
+
+    return rebuilt
