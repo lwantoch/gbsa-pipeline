@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import gemmi
@@ -11,12 +10,19 @@ import numpy as np
 from rdkit import Chem
 from scipy.spatial import cKDTree
 
+from gbsa_pipeline.docking._models import DockingManifest, DockingValidation
 from gbsa_pipeline.docking._receptor_prep import prepare_receptor_with_crystal_waters
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
-    from gbsa_pipeline.docking._models import DockingBox, DockingEngine, DockingRequest, DockingResult
+    from gbsa_pipeline.docking._models import (
+        DockingBox,
+        DockingEngine,
+        DockingRequest,
+        DockingResult,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,61 +30,18 @@ _WATER_RESNAMES: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL
 
 
 # ---------------------------------------------------------------------------
-# Crystal-water docking: data types
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class DockingValidation:
-    """Post-docking geometry checks for one docked pose.
-
-    All distances are in A.  Each entry in the clash lists is a
-    ``(description, distance)`` tuple; bridge entries are
-    ``(water_res_id, ligand_description, protein_description, lig_dist, prot_dist)``.
-    """
-
-    ligand_protein_clashes: list[tuple[str, float]]
-    ligand_water_clashes: list[tuple[str, float]]
-    water_protein_clashes: list[tuple[str, float]]
-    water_bridges: list[tuple[str, str, str, float, float]]
-
-    @property
-    def has_clashes(self) -> bool:
-        """Return True when any clash list is non-empty."""
-        return bool(self.ligand_protein_clashes or self.ligand_water_clashes or self.water_protein_clashes)
-
-
-@dataclass(frozen=True)
-class DockingManifest:
-    """Complete record of a dual docking run with and without active-site crystal waters.
-
-    ``with_waters`` is ``None`` when no crystal waters passed the selection
-    criteria (inside box + near ligand + no receptor clash).
-    """
-
-    without_waters: DockingResult
-    with_waters: DockingResult | None
-    score_without: float | None
-    score_with: float | None
-    retained_water_ids: list[str]
-    receptor_without_waters: Path
-    receptor_with_waters: Path | None
-    validation_without: DockingValidation | None
-    validation_with: DockingValidation | None
-
-
-# ---------------------------------------------------------------------------
-# Coordinate extraction helpers
+# Coordinate helpers
 # ---------------------------------------------------------------------------
 
 
 def _read_pdb_like(path: Path) -> gemmi.Structure:
-    """Read a PDB or PDBQT file with Gemmi using the PDB parser explicitly.
-
-    Forcing ``CoorFormat.Pdb`` ensures PDBQT files (non-standard extension)
-    are parsed correctly instead of falling back to auto-detection.
-    """
+    """Read a PDB or PDBQT file, forcing the PDB parser."""
     return gemmi.read_structure(str(path), format=gemmi.CoorFormat.Pdb)
+
+
+def _atom_pos(atom: Any) -> np.ndarray:
+    """Convert a Gemmi atom position to a (3,) numpy array."""
+    return np.array([atom.pos.x, atom.pos.y, atom.pos.z])
 
 
 def _pdb_heavy_atom_coords(
@@ -86,16 +49,12 @@ def _pdb_heavy_atom_coords(
     *,
     exclude_residues: frozenset[str] = _WATER_RESNAMES,
 ) -> np.ndarray:
-    """Return (N, 3) array of non-hydrogen, non-excluded-residue coordinates in Å.
-
-    Uses only the first model so multi-model PDBQT files do not produce
-    duplicate coordinates.
-    """
+    """Return (N, 3) heavy-atom coordinates from the first model of a PDB/PDBQT file."""
     structure = _read_pdb_like(pdb_path)
     if not structure:
         return np.empty((0, 3))
     coords = [
-        [atom.pos.x, atom.pos.y, atom.pos.z]
+        _atom_pos(atom)
         for chain in structure[0]
         for residue in chain
         if residue.name.strip().upper() not in exclude_residues
@@ -106,7 +65,7 @@ def _pdb_heavy_atom_coords(
 
 
 def _sdf_heavy_atom_coords(sdf_path: Path) -> np.ndarray:
-    """Return (N, 3) array of heavy-atom coordinates in A from the first SDF conformer."""
+    """Return (N, 3) heavy-atom coordinates from the first SDF conformer."""
     mol = Chem.MolFromMolFile(str(sdf_path), removeHs=True, sanitize=False)
     if mol is None or mol.GetNumConformers() == 0:
         return np.empty((0, 3))
@@ -115,26 +74,23 @@ def _sdf_heavy_atom_coords(sdf_path: Path) -> np.ndarray:
 
 
 def _pose_heavy_atom_coords(pose_path: Path) -> np.ndarray:
-    """Return (N, 3) heavy-atom coordinates for a docked pose in A.
-
-    Dispatches to `_pdb_heavy_atom_coords` for ``.pdb`` / ``.pdbqt`` and to
-    `_sdf_heavy_atom_coords` for ``.sdf`` / ``.mol``.
-    """
-    suffix = pose_path.suffix.lower()
-    if suffix in (".pdb", ".pdbqt"):
+    """Return (N, 3) heavy-atom coordinates for a PDB/PDBQT or SDF pose file."""
+    if pose_path.suffix.lower() in (".pdb", ".pdbqt"):
         return _pdb_heavy_atom_coords(pose_path, exclude_residues=frozenset())
     return _sdf_heavy_atom_coords(pose_path)
 
 
-def _water_oxygen(residue: Any) -> np.ndarray | None:
-    """Return the (3,) coordinate array of the first non-hydrogen atom in a residue.
-
-    Returns ``None`` when no such atom is found (e.g. hydrogen-only record).
-    """
-    for atom in residue:
-        if not atom.is_hydrogen():
-            return np.array([atom.pos.x, atom.pos.y, atom.pos.z])
-    return None
+def _iter_water_oxygens(pdb_path: Path) -> Iterator[tuple[str, np.ndarray]]:
+    """Yield ``(res_id, oxygen_xyz)`` for each residue with at least one non-hydrogen atom."""
+    structure = _read_pdb_like(pdb_path)
+    if not structure:
+        return
+    for chain in structure[0]:
+        for residue in chain:
+            for atom in residue:
+                if not atom.is_hydrogen():
+                    yield str(residue.seqid.num), _atom_pos(atom)
+                    break
 
 
 # ---------------------------------------------------------------------------
@@ -168,16 +124,14 @@ def select_docking_crystal_waters(
     ligand_cutoff_angstrom: float = 5.0,
     receptor_clash_cutoff_angstrom: float = 2.2,
 ) -> tuple[Path | None, list[str]]:
-    """Select crystal waters suitable for inclusion in the docking receptor.
+    """Select crystal waters that pass three spatial filters.
 
-    A water oxygen must satisfy all three criteria to be kept:
+    A water oxygen must be: (1) inside the docking box, (2) within
+    ``ligand_cutoff_angstrom`` of a ligand heavy atom, and (3) not within
+    ``receptor_clash_cutoff_angstrom`` of any receptor heavy atom.
 
-    1. Inside the docking box (binding-site spatial filter).
-    2. Within ``ligand_cutoff_angstrom`` of any ligand heavy atom.
-    3. NOT within ``receptor_clash_cutoff_angstrom`` of any receptor heavy atom.
-
-    Returns ``(path_to_selected_pdb, [retained_residue_ids])``.
-    The path is ``None`` when no waters survive all three filters.
+    Returns ``(output_pdb_path, retained_residue_ids)``, or ``(None, [])``
+    when no waters survive all three filters.
     """
     if not crystal_waters_pdb.exists():
         return None, []
@@ -194,52 +148,36 @@ def select_docking_crystal_waters(
     cx, cy, cz = box.center
     hx, hy, hz = box.size[0] / 2.0, box.size[1] / 2.0, box.size[2] / 2.0
 
-    retained_residues: list[tuple[str, Any]] = []  # (chain_name, residue)
+    out_chain = gemmi.Chain("W")
     retained_ids: list[str] = []
 
     for chain in structure[0]:
         for residue in chain:
-            ow = _water_oxygen(residue)
+            ow = next((_atom_pos(a) for a in residue if not a.is_hydrogen()), None)
             if ow is None:
                 continue
-
-            # 1. Inside box
             if not (cx - hx <= ow[0] <= cx + hx and cy - hy <= ow[1] <= cy + hy and cz - hz <= ow[2] <= cz + hz):
                 continue
-
-            # 2. Near ligand
             if lig_tree is not None and not lig_tree.query_ball_point(ow, r=ligand_cutoff_angstrom):
                 continue
-
-            # 3. No receptor clash
             if rec_tree is not None and rec_tree.query_ball_point(ow, r=receptor_clash_cutoff_angstrom):
-                LOGGER.debug(
-                    "Crystal water %s discarded: clash with receptor (%.2f A cutoff).",
-                    residue.seqid.num,
-                    receptor_clash_cutoff_angstrom,
-                )
+                LOGGER.debug("Crystal water %s discarded (receptor clash).", residue.seqid.num)
                 continue
-
-            retained_residues.append((chain.name, residue))
+            out_chain.add_residue(residue.clone())
             retained_ids.append(str(residue.seqid.num))
 
     if not retained_ids:
-        LOGGER.debug("No crystal waters survived selection (box + ligand proximity + clash filter).")
+        LOGGER.debug("No crystal waters survived selection.")
         return None, []
 
-    # Write selected residues as a new PDB
-    out_st = gemmi.Structure()
     out_model = gemmi.Model("1")
-    out_chain = gemmi.Chain("W")
-    for _chain_name, res in retained_residues:
-        out_chain.add_residue(res.clone())
     out_model.add_chain(out_chain)
+    out_st = gemmi.Structure()
     out_st.add_model(out_model)
-
     output_pdb.parent.mkdir(parents=True, exist_ok=True)
     out_st.write_pdb(str(output_pdb))
 
-    LOGGER.info("Selected %d crystal waters for docking: %s", len(retained_ids), retained_ids)
+    LOGGER.info("Selected %d crystal waters: %s", len(retained_ids), retained_ids)
     return output_pdb, retained_ids
 
 
@@ -255,60 +193,42 @@ def validate_docked_pose(
     """Check clashes and water bridges for a docked pose.
 
     Uses ``cKDTree`` for all distance queries.  A "water bridge" is a crystal
-    water whose oxygen is within ``bridge_min``-``bridge_max`` A of BOTH a
-    ligand heavy atom AND a receptor heavy atom simultaneously.
+    water whose oxygen is within ``[bridge_min, bridge_max]`` Å of both a
+    ligand heavy atom and a receptor heavy atom simultaneously.
     """
     lig_coords = _pose_heavy_atom_coords(pose_sdf)
     rec_coords = _pdb_heavy_atom_coords(receptor_pdb)
+    lig_tree = cKDTree(lig_coords) if lig_coords.size > 0 else None
+    rec_tree = cKDTree(rec_coords) if rec_coords.size > 0 else None
 
     lig_protein_clashes: list[tuple[str, float]] = []
     lig_water_clashes: list[tuple[str, float]] = []
     water_protein_clashes: list[tuple[str, float]] = []
     water_bridges: list[tuple[str, str, str, float, float]] = []
 
-    rec_tree = cKDTree(rec_coords) if rec_coords.size > 0 else None
-
-    # Ligand-protein clashes
     if lig_coords.size > 0 and rec_tree is not None:
         for i, lpos in enumerate(lig_coords):
             for j in rec_tree.query_ball_point(lpos, r=clash_cutoff_angstrom):
-                d = float(np.linalg.norm(lpos - rec_coords[j]))
-                lig_protein_clashes.append((f"lig_atom{i}<->rec_atom{j}", d))
+                lig_protein_clashes.append((f"lig_atom{i}<->rec_atom{j}", float(np.linalg.norm(lpos - rec_coords[j]))))
 
-    # Crystal water checks
     if retained_waters_pdb is not None and retained_waters_pdb.exists():
-        water_structure = _read_pdb_like(retained_waters_pdb)
-        lig_tree = cKDTree(lig_coords) if lig_coords.size > 0 else None
-
-        for chain in water_structure[0] if water_structure else []:
-            for residue in chain:
-                ow = _water_oxygen(residue)
-                if ow is None:
-                    continue
-                res_id = str(residue.seqid.num)
-
-                # Water-protein clashes
-                if rec_tree is not None:
-                    for j in rec_tree.query_ball_point(ow, r=clash_cutoff_angstrom):
-                        d = float(np.linalg.norm(ow - rec_coords[j]))
-                        water_protein_clashes.append((f"HOH{res_id}<->rec_atom{j}", d))
-
-                # Ligand-water clashes
-                if lig_tree is not None:
-                    for i in lig_tree.query_ball_point(ow, r=clash_cutoff_angstrom):
-                        d = float(np.linalg.norm(ow - lig_coords[i]))
-                        lig_water_clashes.append((f"HOH{res_id}<->lig_atom{i}", d))
-
-                # Water bridges: OW within bridge range of BOTH ligand and protein
-                if lig_tree is not None and rec_tree is not None:
-                    for i in lig_tree.query_ball_point(ow, r=bridge_max_angstrom):
-                        dl = float(np.linalg.norm(ow - lig_coords[i]))
-                        if dl < bridge_min_angstrom:
-                            continue
-                        for j in rec_tree.query_ball_point(ow, r=bridge_max_angstrom):
-                            dr = float(np.linalg.norm(ow - rec_coords[j]))
-                            if dr < bridge_min_angstrom:
-                                continue
+        for res_id, ow in _iter_water_oxygens(retained_waters_pdb):
+            if rec_tree is not None:
+                for j in rec_tree.query_ball_point(ow, r=clash_cutoff_angstrom):
+                    water_protein_clashes.append(
+                        (f"HOH{res_id}<->rec_atom{j}", float(np.linalg.norm(ow - rec_coords[j])))
+                    )
+            if lig_tree is not None:
+                for i in lig_tree.query_ball_point(ow, r=clash_cutoff_angstrom):
+                    lig_water_clashes.append((f"HOH{res_id}<->lig_atom{i}", float(np.linalg.norm(ow - lig_coords[i]))))
+            if lig_tree is not None and rec_tree is not None:
+                for i in lig_tree.query_ball_point(ow, r=bridge_max_angstrom):
+                    dl = float(np.linalg.norm(ow - lig_coords[i]))
+                    if dl < bridge_min_angstrom:
+                        continue
+                    for j in rec_tree.query_ball_point(ow, r=bridge_max_angstrom):
+                        dr = float(np.linalg.norm(ow - rec_coords[j]))
+                        if dr >= bridge_min_angstrom:
                             water_bridges.append((f"HOH{res_id}", f"lig_atom{i}", f"rec_atom{j}", dl, dr))
 
     return DockingValidation(
@@ -334,12 +254,11 @@ def dock_with_and_without_crystal_waters(
 
     Crystal water selection applies three filters: inside docking box, within
     ``ligand_cutoff_angstrom`` of a ligand heavy atom, and not clashing with
-    the receptor.  Set ``use_crystal_waters=False`` to skip the second run
-    entirely (useful for debugging MD stability without crystal water influence).
+    the receptor.  Set ``use_crystal_waters=False`` to skip the second run.
 
     The receptor in ``request`` must be a ``.pdb`` file so the water-augmented
-    version can be assembled.  Both docked poses are validated post-hoc for
-    ligand/protein/water clashes and water bridges.
+    version can be assembled.  Both poses are validated post-hoc for clashes
+    and water bridges.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -349,7 +268,6 @@ def dock_with_and_without_crystal_waters(
     pose_no_water = _best_pose_path(result_no_water)
     val_no_water = validate_docked_pose(pose_no_water, request.receptor) if pose_no_water is not None else None
 
-    # --- Early-exit guard: skip Run 2 when conditions aren't met ------------
     def _no_water_manifest() -> DockingManifest:
         return DockingManifest(
             without_waters=result_no_water,
@@ -367,12 +285,9 @@ def dock_with_and_without_crystal_waters(
         return _no_water_manifest()
 
     if request.receptor.suffix.lower() != ".pdb":
-        LOGGER.warning("dock_with_and_without_crystal_waters: receptor must be a .pdb file; skipping water run.")
+        LOGGER.warning("receptor must be a .pdb file for crystal-water docking; skipping water run.")
         return _no_water_manifest()
 
-    # Use the docked pose from Run 1 for the proximity filter so waters are
-    # selected relative to the actual binding-site position, not the pre-docking
-    # embedded geometry.
     ligand_ref = pose_no_water if (pose_no_water is not None and pose_no_water.exists()) else ligand_sdf
 
     selected_path, retained_ids = select_docking_crystal_waters(
