@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, NamedTuple
 
+from gbsa_pipeline._spatial import _Coords, _find_clashing_residues, _ResKey
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -82,53 +84,31 @@ def _parse_gro(gro_path: Path) -> list[_GROAtom]:
 # ---------------------------------------------------------------------------
 
 
+def _classify_atoms(
+    atom_lines: list[str],
+    water_resnames: set[str],
+) -> tuple[list[tuple[_ResKey, _Coords]], list[_Coords]]:
+    """Split GRO atom lines into water ``(key, coords)`` pairs and solute coords."""
+    water_atoms: list[tuple[_ResKey, _Coords]] = []
+    solute_coords: list[_Coords] = []
+    for line in atom_lines:
+        atom = _parse_gro_atom_line(line)
+        coords: _Coords = (atom.x, atom.y, atom.z)
+        if atom.res_name in water_resnames:
+            water_atoms.append(((atom.res_num, atom.res_name), coords))
+        else:
+            solute_coords.append(coords)
+    return water_atoms, solute_coords
+
+
 def _find_clashing_water_residues(
     atom_lines: list[str],
     cutoff_nm: float,
     water_resnames: set[str],
-) -> set[tuple[int, str]]:
-    """Identify whole water residues with impossible solute contacts.
-
-    A water residue is flagged when any of its atoms is closer than
-    ``cutoff_nm`` to any non-water atom. Uses a spatial grid to avoid an
-    O(Nwater*Nsolute) full pair loop. Returns a set of ``(res_num, res_name)``
-    keys so all atoms of each clashing water are removed together.
-    """
-    if cutoff_nm <= 0:
-        raise ValueError("cutoff_nm must be positive.")
-
-    cutoff2 = cutoff_nm * cutoff_nm
-    cell_size = cutoff_nm
-    grid: dict[tuple[int, int, int], list[tuple[float, float, float]]] = {}
-    water_atoms: list[tuple[tuple[int, str], tuple[float, float, float]]] = []
-
-    def cell_for(coords: tuple[float, float, float]) -> tuple[int, int, int]:
-        return (int(coords[0] // cell_size), int(coords[1] // cell_size), int(coords[2] // cell_size))
-
-    for line in atom_lines:
-        atom = _parse_gro_atom_line(line)
-        coords = (atom.x, atom.y, atom.z)
-        if atom.res_name in water_resnames:
-            water_atoms.append(((atom.res_num, atom.res_name), coords))
-        else:
-            grid.setdefault(cell_for(coords), []).append(coords)
-
-    clashing: set[tuple[int, str]] = set()
-    neighbour_offsets = tuple((dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1))
-
-    for water_key, (wx, wy, wz) in water_atoms:
-        if water_key in clashing:
-            continue
-        cx, cy, cz = cell_for((wx, wy, wz))
-        for dx, dy, dz in neighbour_offsets:
-            for sx, sy, sz in grid.get((cx + dx, cy + dy, cz + dz), ()):
-                if (wx - sx) ** 2 + (wy - sy) ** 2 + (wz - sz) ** 2 < cutoff2:
-                    clashing.add(water_key)
-                    break
-            if water_key in clashing:
-                break
-
-    return clashing
+) -> set[_ResKey]:
+    """Identify water residues clashing with solute atoms in a GRO atom-line list."""
+    water_atoms, solute_coords = _classify_atoms(atom_lines, water_resnames)
+    return _find_clashing_residues(water_atoms, solute_coords, cutoff_nm)
 
 
 def _write_cleaned_gro(
