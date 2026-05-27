@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -142,7 +143,7 @@ def _group_water_residues(
         current_lines.append(line)
         atom_name = line[12:16].strip()
         if not atom_name.startswith("H") and current_ow is None:
-            with __import__("contextlib").suppress(ValueError):
+            with contextlib.suppress(ValueError):
                 current_ow = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
 
     _flush()
