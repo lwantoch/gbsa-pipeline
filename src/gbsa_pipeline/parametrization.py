@@ -14,13 +14,14 @@ from typing import TYPE_CHECKING, Any, Union
 import BioSimSpace as BSS
 import parmed as pmd
 from openff.toolkit.topology import Molecule
-from openmm.app import ForceField, Modeller, NoCutoff, PDBFile
+from openmm.app import ForceField, Modeller, NoCutoff
 from openmmforcefields.generators import GAFFTemplateGenerator
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 if TYPE_CHECKING:
     from BioSimSpace._SireWrappers import System
 
+from gbsa_pipeline._openmm_utils import _delete_residues_by_name, _load_pdb_as_modeller
 from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
 
 PathLike = Union[str, Path]
@@ -274,37 +275,6 @@ def _write_crystal_waters_pdb(protein_pdb: Path, output_pdb: Path) -> Path | Non
     return output_pdb
 
 
-def _remove_crystal_waters_from_modeller(pdb: PDBFile) -> Modeller:
-    """Return an OpenMM modeller object with crystallographic waters removed.
-
-    OpenMM protein force-field XML files should parameterize the dry protein
-    here, not the crystallographic water molecules from the input structure.
-    Bulk solvent and retained crystallographic waters are handled by the later
-    solvation stage, which keeps parametrization and solvation responsibilities
-    separate. This helper uses OpenMM's own ``Modeller.delete(...)`` method
-    instead of maintaining a second topology parser in this module. The returned
-    modeller preserves the non-water protein coordinates and is then combined
-    with the ligand topology.
-    """
-    modeller = Modeller(pdb.topology, pdb.positions)
-    atoms_before = modeller.topology.getNumAtoms()
-    water_residues = [
-        residue for residue in modeller.topology.residues() if residue.name.strip().upper() in _WATER_RESIDUE_NAMES
-    ]
-
-    if water_residues:
-        modeller.delete(water_residues)
-
-    atoms_after = modeller.topology.getNumAtoms()
-
-    logger.debug(
-        "Removed crystallographic waters from protein topology (%d -> %d atoms).",
-        atoms_before,
-        atoms_after,
-    )
-    return modeller
-
-
 def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     work_dir = inp.work_dir or Path(tempfile.mkdtemp(prefix="gbsa_param_"))
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -320,12 +290,11 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     else:
         logger.debug("Crystal waters written → %s.", crystal_waters_pdb)
 
-    pdb = PDBFile(str(inp.protein_pdb))
-    protein_modeller = _remove_crystal_waters_from_modeller(pdb)
-    logger.debug(
-        "Protein PDB loaded without crystal waters (%d atoms).",
-        protein_modeller.topology.getNumAtoms(),
-    )
+    protein_modeller = _load_pdb_as_modeller(inp.protein_pdb)
+    n_removed = _delete_residues_by_name(protein_modeller, _WATER_RESIDUE_NAMES)
+    if n_removed:
+        logger.debug("Removed %d crystallographic water residue(s) from protein topology.", n_removed)
+    logger.debug("Protein PDB loaded without crystal waters (%d atoms).", protein_modeller.topology.getNumAtoms())
 
     # --- Ligand --------------------------------------------------------
     logger.debug("Loading ligand SDF: %s …", inp.ligand_sdf)

@@ -42,9 +42,15 @@ from typing import IO, TYPE_CHECKING, Any
 import parmed as pmd
 from openmm import Vec3
 from openmm import unit as mm_unit
-from openmm.app import ForceField, Modeller, NoCutoff, PDBFile
+from openmm.app import ForceField, Modeller, NoCutoff
 
 from gbsa_pipeline._gro_io import _parse_gro
+from gbsa_pipeline._openmm_utils import (
+    _heavy_atom_coords,
+    _load_waters_with_hydrogens,
+    _oxygen_atom_entries,
+    _write_modeller_pdb,
+)
 from gbsa_pipeline._spatial import _find_clashing_residues
 from gbsa_pipeline.solvation_box import BoxShape, SolvationParams, WaterModel
 
@@ -373,58 +379,26 @@ def _restore_crystal_waters_before_solvation(
         logger.debug("Crystal water file not found: %s.", crystal_waters_pdb)
         return None
 
-    water_pdb = PDBFile(str(crystal_waters_pdb))
-    water_modeller = Modeller(water_pdb.topology, water_pdb.positions)
+    water_modeller = _load_waters_with_hydrogens(crystal_waters_pdb, forcefield)
 
-    atoms_before = water_modeller.topology.getNumAtoms()
-    water_modeller.addHydrogens(forcefield)
-    atoms_after = water_modeller.topology.getNumAtoms()
-
-    # Build a list of existing heavy-atom positions (protein + ligand) in nm.
-    existing_positions_nm = list(modeller.positions.value_in_unit(mm_unit.nanometer))
-    solute_coords: list[tuple[float, float, float]] = [
-        (pos[0], pos[1], pos[2])
-        for atom, pos in zip(modeller.topology.atoms(), existing_positions_nm)
-        if atom.element is not None and atom.element.symbol != "H"
-    ]
-
-    # Identify which water residues (by oxygen position) clash with existing atoms.
-    clashing_residues: set[Any] = set()
-    if solute_coords:
-        water_positions_nm = list(water_modeller.positions.value_in_unit(mm_unit.nanometer))
-        water_oxygen_entries: list[tuple[Any, tuple[float, float, float]]] = [
-            (atom.residue, (pos[0], pos[1], pos[2]))
-            for atom, pos in zip(water_modeller.topology.atoms(), water_positions_nm)
-            if atom.element is not None and atom.element.symbol == "O"
-        ]
-        clashing_residues = _find_clashing_residues(water_oxygen_entries, solute_coords, _CLASH_CUTOFF_NM)
-
-    if clashing_residues:
+    clashing = _find_clashing_residues(
+        _oxygen_atom_entries(water_modeller),
+        _heavy_atom_coords(modeller),
+        _CLASH_CUTOFF_NM,
+    )
+    if clashing:
         logger.debug(
             "Dropping %d crystal water(s) clashing with existing atoms (cutoff %.2f nm).",
-            len(clashing_residues),
+            len(clashing),
             _CLASH_CUTOFF_NM,
         )
-        water_modeller.delete(list(clashing_residues))
+        water_modeller.delete(list(clashing))
 
     n_restored = water_modeller.topology.getNumResidues()
-    output_pdb.parent.mkdir(parents=True, exist_ok=True)
-    with output_pdb.open("w", encoding="utf-8") as handle:
-        PDBFile.writeFile(
-            water_modeller.topology,
-            water_modeller.positions,
-            handle,
-            keepIds=True,
-        )
-
+    _write_modeller_pdb(water_modeller, output_pdb)
     modeller.add(water_modeller.topology, water_modeller.positions)
 
-    logger.debug(
-        "Restored %d crystal water(s) with OpenMM hydrogens (%d -> %d atoms).",
-        n_restored,
-        atoms_before,
-        atoms_after,
-    )
+    logger.debug("Restored %d crystal water(s).", n_restored)
     return output_pdb
 
 
