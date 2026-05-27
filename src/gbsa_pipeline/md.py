@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any
 
 import BioSimSpace as BSS
 
+from gbsa_pipeline._gro_io import _parse_gro_atom_line
 from gbsa_pipeline.md_diagnostics import analyze_crash_frames, check_posre_consistency
 from gbsa_pipeline.mdp import GromacsParams, field_to_mdp_key, set_mdp_key
 
@@ -320,33 +321,6 @@ def _check_stage_posre(work_dir: Path, stage_name: str) -> None:
 _GRO_WATER_RESNAMES = {"SOL", "HOH", "WAT", "TIP3", "TIP3P"}
 
 
-def _parse_gro_atom_line(
-    line: str,
-) -> tuple[int, str, str, int, tuple[float, float, float]]:
-    """Parse the fixed-width fields needed from one GROMACS GRO atom line.
-
-    GRO atom lines are fixed-width records with residue number, residue name,
-    atom name, atom number, and coordinates in nanometres. The cleanup helper
-    only needs those fields, so velocities and other trailing content are left
-    untouched when the file is rewritten. A small local parser is used instead
-    of a structural dependency because this helper must keep the GROMACS
-    topology and coordinate files in lockstep. Parsing errors are raised with
-    the original line content so malformed intermediate files fail explicitly.
-    """
-    try:
-        residue_number = int(line[0:5])
-        residue_name = line[5:10].strip()
-        atom_name = line[10:15].strip()
-        atom_number = int(line[15:20])
-        x = float(line[20:28])
-        y = float(line[28:36])
-        z = float(line[36:44])
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Could not parse GRO atom line: {line!r}") from exc
-
-    return residue_number, residue_name, atom_name, atom_number, (x, y, z)
-
-
 def _water_residue_key(line: str, water_resnames: set[str]) -> tuple[int, str] | None:
     """Return a residue key for solvent water atom lines.
 
@@ -358,9 +332,9 @@ def _water_residue_key(line: str, water_resnames: set[str]) -> tuple[int, str] |
     deliberately excluded so the cleanup cannot remove chemically meaningful
     solute atoms.
     """
-    residue_number, residue_name, _atom_name, _atom_number, _xyz = _parse_gro_atom_line(line)
-    if residue_name in water_resnames:
-        return (residue_number, residue_name)
+    atom = _parse_gro_atom_line(line)
+    if atom.res_name in water_resnames:
+        return (atom.res_num, atom.res_name)
     return None
 
 
@@ -397,9 +371,10 @@ def _find_clashing_water_residues(
         )
 
     for line in atom_lines:
-        residue_number, residue_name, _atom_name, _atom_number, coords = _parse_gro_atom_line(line)
-        if residue_name in water_resnames:
-            water_atoms.append(((residue_number, residue_name), coords))
+        atom = _parse_gro_atom_line(line)
+        coords = (atom.x, atom.y, atom.z)
+        if atom.res_name in water_resnames:
+            water_atoms.append(((atom.res_num, atom.res_name), coords))
             continue
         grid.setdefault(cell_for(coords), []).append(coords)
 
