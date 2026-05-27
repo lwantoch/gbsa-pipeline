@@ -7,11 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from gbsa_pipeline.mdp import (
+    CommMode,
     GromacsCustom,
     GromacsParams,
+    Integrator,
     run_gro_custom,
 )
-from gbsa_pipeline.mdp_enum import CommMode, Integrator
 
 
 def test_params_canonical_enum() -> None:
@@ -109,9 +110,8 @@ def test_run_gro_custom_applies_overrides(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     system = object()
     customized, protocol = run_gro_custom(
-        parameters=None,
-        system=system,
         params={"nsteps": 20},
+        system=system,
     )
 
     assert customized is system

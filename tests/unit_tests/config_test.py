@@ -15,10 +15,10 @@ from gbsa_pipeline.config import (
     SolvationConfig,
     SystemConfig,
 )
-from gbsa_pipeline.mdp import GromacsParams
-from gbsa_pipeline.mdp_enum import (
+from gbsa_pipeline.mdp import (
     Barostat,
     Constraints,
+    GromacsParams,
     Thermostat,
     VelocityGeneration,
 )
