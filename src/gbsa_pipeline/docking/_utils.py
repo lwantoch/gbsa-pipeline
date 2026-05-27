@@ -14,16 +14,6 @@ VINA_SCORE_COLUMN_INDEX = 1
 VINA_TOP_RANK = "1"
 
 
-def _require_file(path: Path, label: str = "File") -> Path:
-    """Resolve *path* and raise if it is missing or not a regular file."""
-    path = path.resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"{label} not found: {path}")
-    if not path.is_file():
-        raise ValueError(f"{label} path is not a file: {path}")
-    return path
-
-
 def _summarize_stderr(stderr: str, max_lines: int = 4) -> str:
     """Return a short preview of stderr suitable for terminal output.
 

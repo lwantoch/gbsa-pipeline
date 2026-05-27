@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from subprocess import CompletedProcess, run
 
-from gbsa_pipeline.docking._utils import _require_file, _summarize_stderr, _write_process_log
+from gbsa_pipeline.docking._utils import _summarize_stderr, _write_process_log
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,7 +30,13 @@ def convert_receptor_pdb_to_pdbqt(
     Receptor hydrogen addition, protonation-state decisions, and structural
     cleanup are still expected to happen upstream.
     """
-    receptor_pdb = _require_file(Path(receptor_pdb), "Receptor PDB")
+    receptor_pdb = Path(receptor_pdb).resolve()
+
+    if not receptor_pdb.exists():
+        raise FileNotFoundError(f"Receptor PDB not found: {receptor_pdb}")
+
+    if not receptor_pdb.is_file():
+        raise ValueError(f"Receptor path is not a file: {receptor_pdb}")
 
     if receptor_pdb.suffix.lower() != ".pdb":
         raise ValueError(f"Expected a .pdb receptor input, got: {receptor_pdb}")

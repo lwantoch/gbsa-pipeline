@@ -144,45 +144,6 @@ class DockingResult:
     raw_outputs: Mapping[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class DockingValidation:
-    """Post-docking geometry checks for one docked pose.
-
-    All distances are in Å.  Each entry in the clash lists is a
-    ``(description, distance)`` tuple; bridge entries are
-    ``(water_res_id, lig_description, prot_description, lig_dist, prot_dist)``.
-    """
-
-    ligand_protein_clashes: list[tuple[str, float]]
-    ligand_water_clashes: list[tuple[str, float]]
-    water_protein_clashes: list[tuple[str, float]]
-    water_bridges: list[tuple[str, str, str, float, float]]
-
-    @property
-    def has_clashes(self) -> bool:
-        """Return True when any clash list is non-empty."""
-        return bool(self.ligand_protein_clashes or self.ligand_water_clashes or self.water_protein_clashes)
-
-
-@dataclass(frozen=True)
-class DockingManifest:
-    """Complete record of a dual docking run with and without active-site crystal waters.
-
-    ``with_waters`` is ``None`` when no crystal waters passed the selection
-    criteria (inside box + near ligand + no receptor clash).
-    """
-
-    without_waters: DockingResult
-    with_waters: DockingResult | None
-    score_without: float | None
-    score_with: float | None
-    retained_water_ids: list[str]
-    receptor_without_waters: Path
-    receptor_with_waters: Path | None
-    validation_without: DockingValidation | None
-    validation_with: DockingValidation | None
-
-
 class DockingEngine(Protocol):
     """Protocol implemented by docking backends.
 
