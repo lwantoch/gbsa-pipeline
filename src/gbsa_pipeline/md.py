@@ -277,7 +277,7 @@ def _apply_gromacs_params_to_config(
 
     for key, value in final_params.to_mapping().items():
         updated_config = _remove_existing_mdp_key(updated_config, key)
-        set_mdp_key(updated_config, key, value, inplace=True)
+        updated_config = set_mdp_key(updated_config, key, value)
 
     return updated_config
 
@@ -738,8 +738,8 @@ def _run_bss_protocol(
         config = list(process.getConfig())
         for _key in ("continuation", "gen-vel"):
             config = _remove_existing_mdp_key(config, _key)
-        set_mdp_key(config, "continuation", "yes", inplace=True)
-        set_mdp_key(config, "gen-vel", "no", inplace=True)
+        config = set_mdp_key(config, "continuation", "yes")
+        config = set_mdp_key(config, "gen-vel", "no")
         process.setConfig(config)
 
     # Validate position restraints before mdrun when the stage uses them.

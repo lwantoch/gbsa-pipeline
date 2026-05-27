@@ -24,6 +24,7 @@ this module so callers only need a single import::
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from enum import Enum
 from tempfile import NamedTemporaryFile
@@ -122,52 +123,31 @@ def format_gmx_value(value: Any) -> str:
 # Raw MDP line helpers  (used by md.py to patch BSS-generated configs)
 # ---------------------------------------------------------------------------
 
-
-def _is_comment(line: str) -> bool:
-    """Return True when a line is blank or a full-line comment (``#`` / ``;``)."""
-    stripped = line.lstrip()
-    return not stripped or stripped.startswith(("#", ";"))
-
-
-def _leading_ws(s: str) -> str:
-    """Return the leading whitespace prefix of *s*."""
-    i = next((j for j, c in enumerate(s) if not c.isspace()), len(s))
-    return s[:i]
+# Matches a GROMACS MDP assignment line, capturing four groups:
+#   1. leading whitespace   2. key (word chars + hyphens)
+#   3. = with surrounding whitespace   4. optional inline comment
+_MDP_ASSIGNMENT = re.compile(r"^(\s*)([\w-]+)(\s*=\s*)[^;#]*\s*([;#].*)?$")
 
 
-def _split_inline_comment(s: str) -> tuple[str, str]:
-    """Split *s* at the first ``#`` or ``;`` into ``(body, comment)``."""
-    semi, hash_ = s.find(";"), s.find("#")
-    if semi == -1 and hash_ == -1:
-        return s, ""
-    idx = min(x for x in (semi, hash_) if x != -1)
-    return s[:idx], s[idx:]
+def set_mdp_key(lines: list[str], key: str, value: Any) -> list[str]:
+    """Return a copy of *lines* with ``key = value`` updated or appended.
 
-
-def set_mdp_key(lines: list[str], key: str, value: Any, *, inplace: bool = True) -> list[str]:
-    """Update or append ``key = value`` in a list of MDP lines.
-
-    The first matching assignment is updated in-place, preserving its inline
-    comment.  When the key is absent it is appended in aligned format.  Pass
-    ``inplace=False`` to receive a modified copy without touching the original.
+    The first matching assignment is replaced, preserving its original
+    indentation, ``=``-spacing, and inline comment.  When the key is absent
+    it is appended in aligned ``key = value`` format.
     """
     mdp_value = format_gmx_value(value)
-    out = lines if inplace else list(lines)
     wanted = key.strip()
 
-    for i, ln in enumerate(out):
-        if _is_comment(ln):
+    for i, ln in enumerate(lines):
+        m = _MDP_ASSIGNMENT.match(ln)
+        if m is None or m.group(2) != wanted:
             continue
-        left, sep, right = ln.partition("=")
-        if not sep or left.strip() != wanted:
-            continue
-        before, comment = _split_inline_comment(right)
-        out[i] = f"{left}={_leading_ws(before)}{mdp_value}{comment}"
-        break
-    else:
-        out.append(f"{wanted:<28} = {mdp_value}")
+        indent, _, eq_ws, comment = m.groups()
+        suffix = f"  {comment}" if comment else ""
+        return [*lines[:i], f"{indent}{wanted}{eq_ws}{mdp_value}{suffix}", *lines[i + 1 :]]
 
-    return out
+    return [*lines, f"{wanted:<28} = {mdp_value}"]
 
 
 # ---------------------------------------------------------------------------
