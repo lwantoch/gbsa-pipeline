@@ -62,9 +62,8 @@ from typing import TYPE_CHECKING, Any
 
 import BioSimSpace as BSS
 
-from gbsa_pipeline.change_defaults import GromacsParams
-from gbsa_pipeline.change_params import field_to_mdp_key, set_mdp_key
 from gbsa_pipeline.md_diagnostics import analyze_crash_frames, check_posre_consistency
+from gbsa_pipeline.mdp import GromacsParams, field_to_mdp_key, set_mdp_key
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

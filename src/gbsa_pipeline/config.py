@@ -10,7 +10,7 @@ from typing import Any
 import tomllib
 from pydantic import BaseModel, ConfigDict, Field
 
-from gbsa_pipeline.change_defaults import GromacsParams
+from gbsa_pipeline.mdp import GromacsParams
 from gbsa_pipeline.parametrization import ParametrizationConfig, ParametrizationInput
 from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
 from gbsa_pipeline.solvation_box import BoxShape, WaterModel
@@ -72,7 +72,7 @@ class RunConfig(BaseModel):
 
     Load from a TOML file with :meth:`from_toml`. Each section maps to a
     nested model. The ``[md]`` section accepts any field of
-    :class:`~gbsa_pipeline.change_defaults.GromacsParams`.
+    :class:`~gbsa_pipeline.mdp.GromacsParams`.
 
     Example:
     -------

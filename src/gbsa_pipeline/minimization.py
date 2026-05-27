@@ -4,7 +4,7 @@
     Use :func:`gbsa_pipeline.md.run_minimization` directly.
     This module remains to avoid breaking existing callers that pass ``nsteps``
     positionally.  New code should construct a
-    :class:`~gbsa_pipeline.change_defaults.GromacsParams` with
+    :class:`~gbsa_pipeline.mdp.GromacsParams` with
     ``integrator=Integrator.STEEP`` and pass it to ``md.run_minimization``.
 """
 
@@ -33,7 +33,7 @@ def run_minimization(
 
     .. deprecated::
         Use :func:`gbsa_pipeline.md.run_minimization` with a
-        :class:`~gbsa_pipeline.change_defaults.GromacsParams` instead.
+        :class:`~gbsa_pipeline.mdp.GromacsParams` instead.
 
     Args:
         nsteps: Maximum number of minimization steps.
