@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 import numpy as np
 from scipy.spatial import cKDTree
 
+from gbsa_pipeline._gro_io import _GROAtom, _parse_gro
+
 logger = logging.getLogger(__name__)
 
 # Atom names considered "backbone" for position-restraint validation.
@@ -46,16 +48,6 @@ _SOLVENT_RESIDUE_NAMES: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 
 
-class _GROAtom(NamedTuple):
-    atom_idx: int  # 1-based atom index in file
-    res_num: int
-    res_name: str
-    atom_name: str
-    x: float  # nm
-    y: float  # nm
-    z: float  # nm
-
-
 class PosreCheckResult(NamedTuple):
     """Result of a position-restraint consistency check."""
 
@@ -63,32 +55,6 @@ class PosreCheckResult(NamedTuple):
     n_restrained: int
     unexpected: list[tuple[int, str, str]]  # (atom_idx, res_name, atom_name)
     first_twenty: list[tuple[int, str, str]]  # (atom_idx, res_name, atom_name)
-
-
-# ---------------------------------------------------------------------------
-# GRO parser (minimal)
-# ---------------------------------------------------------------------------
-
-
-def _parse_gro(gro_path: Path) -> list[_GROAtom]:
-    """Read a GROMACS GRO file and return one entry per atom."""
-    atoms: list[_GROAtom] = []
-    with gro_path.open(encoding="utf-8", errors="replace") as fh:
-        fh.readline()  # title line
-        n_atoms = int(fh.readline())
-        for _line_idx in range(n_atoms):
-            line = fh.readline()
-            if len(line) < 44:  # noqa: PLR2004
-                continue
-            res_num = int(line[0:5])
-            res_name = line[5:10].strip()
-            atom_name = line[10:15].strip()
-            atom_index = int(line[15:20])
-            x = float(line[20:28])
-            y = float(line[28:36])
-            z = float(line[36:44])
-            atoms.append(_GROAtom(atom_index, res_num, res_name, atom_name, x, y, z))
-    return atoms
 
 
 # ---------------------------------------------------------------------------
