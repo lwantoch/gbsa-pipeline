@@ -2,18 +2,15 @@
 
 The docking subpackage is organised into focused modules:
 
-- :mod:`._models` ? validated input/output dataclasses and the
+- :mod:`._models` — validated input/output dataclasses and the
   :class:`DockingEngine` Protocol.
-<<<<<<< ./src/gbsa_pipeline/docking/__init___LOCAL_91781.py
-=======
-- :mod:`._mol_utils` ? molecule loading, hydrogen removal, centroid helpers.
->>>>>>> ./src/gbsa_pipeline/docking/__init___REMOTE_91781.py
-- :mod:`._ligand_prep` ? SMILES/RDKit ? PDBQT preparation and PDBQT ? SDF
+- :mod:`._mol_utils` — molecule loading, hydrogen removal, centroid helpers.
+- :mod:`._ligand_prep` — SMILES/RDKit → PDBQT preparation and PDBQT → SDF
   export with bond-order repair.
-- :mod:`._receptor_prep` ? PDB ? PDBQT conversion and crystal-water merging.
-- :mod:`._crystal_waters` ? active-site water selection, post-docking
+- :mod:`._receptor_prep` — PDB → PDBQT conversion and crystal-water merging.
+- :mod:`._crystal_waters` — active-site water selection, post-docking
   validation, and the dual-run orchestrator.
-- :mod:`._vina` ? :class:`VinaEngine` (subprocess-based Vina wrapper).
+- :mod:`._vina` — :class:`VinaEngine` (subprocess-based Vina wrapper).
 
 Every name that was previously public in ``docking.py`` is re-exported here so
 existing imports like ``from gbsa_pipeline.docking import VinaEngine`` continue
@@ -21,11 +18,6 @@ to work without change.
 """
 
 from gbsa_pipeline.docking._crystal_waters import (
-<<<<<<< ./src/gbsa_pipeline/docking/__init___LOCAL_91781.py
-=======
-    DockingManifest,
-    DockingValidation,
->>>>>>> ./src/gbsa_pipeline/docking/__init___REMOTE_91781.py
     dock_with_and_without_crystal_waters,
     select_docking_crystal_waters,
     validate_docked_pose,
@@ -39,31 +31,21 @@ from gbsa_pipeline.docking._models import (
     DockedPose,
     DockingBox,
     DockingEngine,
-<<<<<<< ./src/gbsa_pipeline/docking/__init___LOCAL_91781.py
     DockingManifest,
-=======
->>>>>>> ./src/gbsa_pipeline/docking/__init___REMOTE_91781.py
     DockingRequest,
     DockingResult,
-<<<<<<< ./src/gbsa_pipeline/docking/__init___LOCAL_91781.py
     DockingValidation,
-=======
 )
 from gbsa_pipeline.docking._mol_utils import (
     load_first_sdf_molecule,
     molecule_centroid,
     remove_hydrogens_copy,
->>>>>>> ./src/gbsa_pipeline/docking/__init___REMOTE_91781.py
 )
 from gbsa_pipeline.docking._receptor_prep import (
     convert_receptor_pdb_to_pdbqt,
     prepare_receptor_with_crystal_waters,
 )
 from gbsa_pipeline.docking._vina import VinaEngine
-<<<<<<< ./src/gbsa_pipeline/docking/__init___LOCAL_91781.py
-from gbsa_pipeline.mol_utils import load_first_sdf_molecule, molecule_centroid, remove_hydrogens_copy
-=======
->>>>>>> ./src/gbsa_pipeline/docking/__init___REMOTE_91781.py
 
 __all__ = [
     "DockedPose",
