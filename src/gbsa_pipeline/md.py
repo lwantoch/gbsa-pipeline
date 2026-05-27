@@ -62,9 +62,8 @@ from typing import TYPE_CHECKING, Any
 
 import BioSimSpace as BSS
 
-from gbsa_pipeline.change_defaults import GromacsParams
-from gbsa_pipeline.change_params import set_mdp_key
 from gbsa_pipeline.md_diagnostics import analyze_crash_frames, check_posre_consistency
+from gbsa_pipeline.mdp import GromacsParams, field_to_mdp_key, set_mdp_key
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -222,20 +221,6 @@ def _format_gromacs_failure_report(work_dir: Path | None, stage_name: str) -> st
     return "\n".join(report_parts)
 
 
-def _normalise_mdp_key(key: str) -> str:
-    """Return a comparison-safe GROMACS MDP key.
-
-    BioSimSpace and local parameter models do not always write MDP keys with
-    identical spelling. For example, one source can write ``DispCorr`` while
-    another writes ``dispcorr``; similarly, Python-facing code may use
-    underscores while GROMACS normally uses hyphens. GROMACS treats those as the
-    same logical parameter often enough that exact string matching is unsafe for
-    config merging. This helper normalises only for comparison and does not
-    decide how the final key should be written.
-    """
-    return key.strip().lower().replace("_", "-")
-
-
 def _mdp_key_from_line(line: str) -> str | None:
     """Extract a normalised MDP key from one config line.
 
@@ -252,7 +237,7 @@ def _mdp_key_from_line(line: str) -> str | None:
         return None
 
     key, _value = body.split("=", 1)
-    return _normalise_mdp_key(key)
+    return field_to_mdp_key(key)
 
 
 def _remove_existing_mdp_key(config: list[str], key: str) -> list[str]:
@@ -265,7 +250,7 @@ def _remove_existing_mdp_key(config: list[str], key: str) -> list[str]:
     guarantees that the later write produces a single final value for the key.
     Comments and unrelated config lines are preserved.
     """
-    target_key = _normalise_mdp_key(key)
+    target_key = field_to_mdp_key(key)
 
     return [line for line in config if _mdp_key_from_line(line) != target_key]
 
@@ -292,7 +277,7 @@ def _apply_gromacs_params_to_config(
 
     for key, value in final_params.to_mapping().items():
         updated_config = _remove_existing_mdp_key(updated_config, key)
-        set_mdp_key(updated_config, key, value, inplace=True)
+        updated_config = set_mdp_key(updated_config, key, value)
 
     return updated_config
 
@@ -753,8 +738,8 @@ def _run_bss_protocol(
         config = list(process.getConfig())
         for _key in ("continuation", "gen-vel"):
             config = _remove_existing_mdp_key(config, _key)
-        set_mdp_key(config, "continuation", "yes", inplace=True)
-        set_mdp_key(config, "gen-vel", "no", inplace=True)
+        config = set_mdp_key(config, "continuation", "yes")
+        config = set_mdp_key(config, "gen-vel", "no")
         process.setConfig(config)
 
     # Validate position restraints before mdrun when the stage uses them.

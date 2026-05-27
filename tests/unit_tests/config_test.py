@@ -9,18 +9,18 @@ from unittest import mock
 import pytest
 from pydantic import ValidationError
 
-from gbsa_pipeline.change_defaults import GromacsParams
-from gbsa_pipeline.change_defaults_enum import (
-    Barostat,
-    Constraints,
-    Thermostat,
-    VelocityGeneration,
-)
 from gbsa_pipeline.cli import main as cli_main
 from gbsa_pipeline.config import (
     RunConfig,
     SolvationConfig,
     SystemConfig,
+)
+from gbsa_pipeline.mdp import (
+    Barostat,
+    Constraints,
+    GromacsParams,
+    Thermostat,
+    VelocityGeneration,
 )
 from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
 from gbsa_pipeline.solvation_box import BoxShape, WaterModel
