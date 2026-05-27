@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
+from typing import TypeVar
+
 _Coords = tuple[float, float, float]
-_ResKey = tuple[int, str]
+_ResKey = tuple[int, str]  # canonical key for GRO residues; kept for _gro_io.py annotations
 _CellGrid = dict[tuple[int, int, int], list[_Coords]]
 _NEIGHBOUR_OFFSETS = tuple((dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1))
+
+_K = TypeVar("_K", bound=Hashable)
 
 
 def _build_cell_grid(coords: list[_Coords], cell_size: float) -> _CellGrid:
@@ -18,10 +23,10 @@ def _build_cell_grid(coords: list[_Coords], cell_size: float) -> _CellGrid:
 
 
 def _find_clashing_residues(
-    candidate_entries: list[tuple[_ResKey, _Coords]],
+    candidate_entries: list[tuple[_K, _Coords]],
     reference_coords: list[_Coords],
     cutoff: float,
-) -> set[_ResKey]:
+) -> set[_K]:
     """Return residue keys whose atoms come within ``cutoff`` of any reference coordinate.
 
     ``candidate_entries`` is a list of ``(residue_key, coords)`` pairs (e.g. water
@@ -36,7 +41,7 @@ def _find_clashing_residues(
 
     grid = _build_cell_grid(reference_coords, cutoff)
     cutoff2 = cutoff * cutoff
-    clashing: set[_ResKey] = set()
+    clashing: set[_K] = set()
 
     for res_key, (wx, wy, wz) in candidate_entries:
         if res_key in clashing:

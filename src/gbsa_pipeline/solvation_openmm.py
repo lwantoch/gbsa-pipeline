@@ -39,13 +39,13 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import IO, TYPE_CHECKING, Any
 
-import numpy as np
 import parmed as pmd
 from openmm import Vec3
 from openmm import unit as mm_unit
 from openmm.app import ForceField, Modeller, NoCutoff, PDBFile
-from scipy.spatial import cKDTree
 
+from gbsa_pipeline._gro_io import _parse_gro
+from gbsa_pipeline._spatial import _find_clashing_residues
 from gbsa_pipeline.solvation_box import BoxShape, SolvationParams, WaterModel
 
 if TYPE_CHECKING:
@@ -273,20 +273,14 @@ def relax_solvated_water(gro: Path, top: Path, work_dir: Path, *, nsteps: int = 
     """
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    lines = gro.read_text().splitlines()
-    n_atoms = int(lines[1].strip())
-
-    nonwater_atoms: list[int] = []
-    for i, line in enumerate(lines[2 : 2 + n_atoms], start=1):
-        # GRO residue-name field: columns 5-9 (0-based). Lines shorter than
-        # 10 characters are malformed and skipped rather than crashing.
-        if len(line) >= len("    1RES  ATM") and line[5:10].strip() not in _WATER_RESIDUES:
-            nonwater_atoms.append(i)
+    atoms = _parse_gro(gro)
+    all_indices = [a.atom_idx for a in atoms]
+    nonwater_atoms = [a.atom_idx for a in atoms if a.res_name not in _WATER_RESIDUES]
 
     ndx = work_dir / "freeze.ndx"
     with ndx.open("w") as f:
         f.write("[ System ]\n")
-        _write_ndx_indices(f, range(1, n_atoms + 1))
+        _write_ndx_indices(f, all_indices)
         f.write("\n[ non-Water ]\n")
         _write_ndx_indices(f, nonwater_atoms)
 
@@ -386,26 +380,24 @@ def _restore_crystal_waters_before_solvation(
     water_modeller.addHydrogens(forcefield)
     atoms_after = water_modeller.topology.getNumAtoms()
 
-    # Build an array of existing heavy-atom positions (protein + ligand) in nm.
-    existing_positions = list(modeller.positions.value_in_unit(mm_unit.nanometer))
-    existing_heavy = np.array(
-        [
-            pos
-            for atom, pos in zip(modeller.topology.atoms(), existing_positions)
-            if atom.element is not None and atom.element.symbol != "H"
-        ]
-    )
+    # Build a list of existing heavy-atom positions (protein + ligand) in nm.
+    existing_positions_nm = list(modeller.positions.value_in_unit(mm_unit.nanometer))
+    solute_coords: list[tuple[float, float, float]] = [
+        (pos[0], pos[1], pos[2])
+        for atom, pos in zip(modeller.topology.atoms(), existing_positions_nm)
+        if atom.element is not None and atom.element.symbol != "H"
+    ]
 
     # Identify which water residues (by oxygen position) clash with existing atoms.
     clashing_residues: set[Any] = set()
-    if existing_heavy.size > 0:
-        tree = cKDTree(existing_heavy)
+    if solute_coords:
         water_positions_nm = list(water_modeller.positions.value_in_unit(mm_unit.nanometer))
-        for atom, pos in zip(water_modeller.topology.atoms(), water_positions_nm):
-            if atom.element is not None and atom.element.symbol == "O":
-                hits = tree.query_ball_point(pos, r=_CLASH_CUTOFF_NM)
-                if hits:
-                    clashing_residues.add(atom.residue)
+        water_oxygen_entries: list[tuple[Any, tuple[float, float, float]]] = [
+            (atom.residue, (pos[0], pos[1], pos[2]))
+            for atom, pos in zip(water_modeller.topology.atoms(), water_positions_nm)
+            if atom.element is not None and atom.element.symbol == "O"
+        ]
+        clashing_residues = _find_clashing_residues(water_oxygen_entries, solute_coords, _CLASH_CUTOFF_NM)
 
     if clashing_residues:
         logger.debug(
