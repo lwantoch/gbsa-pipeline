@@ -7,14 +7,11 @@ from pathlib import Path
 
 from meeko import MoleculePreparation, PDBQTMolecule, PDBQTWriterLegacy, RDKitMolCreate
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdmolops
 from rdkit.Chem.rdDistGeom import EmbedMolecule
 from rdkit.Chem.rdForceFieldHelpers import UFFOptimizeMolecule
 
-from gbsa_pipeline.docking._utils import (
-    _extract_pdbqt_string_from_meeko_result,
-    _require_file,
-)
+from gbsa_pipeline.docking._utils import _extract_pdbqt_string_from_meeko_result, _require_file
+from gbsa_pipeline.mol_utils import assign_bond_orders_from_template
 
 LOGGER = logging.getLogger(__name__)
 
@@ -74,33 +71,8 @@ def _mol_to_pdbqt_string(mol: Chem.Mol) -> str:
 # ---------------------------------------------------------------------------
 
 
-def assign_bond_orders_from_template_mol(
-    template_mol: Chem.Mol,
-    target_mol: Chem.Mol,
-    *,
-    add_hydrogens: bool = False,
-) -> Chem.Mol:
-    """Repair target bond orders from a template while preserving target geometry.
-
-    Uses RDKit's ``AssignBondOrdersFromTemplate`` on heavy-atom graphs, then
-    infers stereochemistry from existing 3D coordinates.
-    """
-    template_no_h = Chem.RemoveHs(Chem.Mol(template_mol))
-    target_no_h = Chem.RemoveHs(Chem.Mol(target_mol))
-
-    try:
-        rebuilt = AllChem.AssignBondOrdersFromTemplate(template_no_h, target_no_h)
-    except Exception as exc:
-        raise RuntimeError(
-            "RDKit AssignBondOrdersFromTemplate failed. Template and target molecule likely do not match."
-        ) from exc
-
-    rdmolops.AssignStereochemistryFrom3D(rebuilt)
-
-    if add_hydrogens:
-        rebuilt = Chem.AddHs(rebuilt, addCoords=True)
-
-    return rebuilt
+# Preserved for backward compatibility — the generic implementation lives in mol_utils.
+assign_bond_orders_from_template_mol = assign_bond_orders_from_template
 
 
 def export_pdbqt_to_sdf(
@@ -113,7 +85,7 @@ def export_pdbqt_to_sdf(
     """Export a PDBQT file to SDF, optionally rebuilding bond orders from a template.
 
     When ``template_mol`` is given every pose is passed through
-    :func:`assign_bond_orders_from_template_mol` before writing.
+    :func:`assign_bond_orders_from_template` before writing.
     """
     pdbqt_path = _require_file(Path(pdbqt_path), "PDBQT file")
     output_sdf = Path(output_sdf).resolve()
@@ -131,9 +103,7 @@ def export_pdbqt_to_sdf(
     def _to_output(raw_mol: Chem.Mol) -> Chem.Mol:
         if template_mol is None:
             return raw_mol
-        repaired = assign_bond_orders_from_template_mol(
-            template_mol, raw_mol, add_hydrogens=add_hydrogens_after_template
-        )
+        repaired = assign_bond_orders_from_template(template_mol, raw_mol, add_hydrogens=add_hydrogens_after_template)
         if raw_mol.HasProp("_Name"):
             repaired.SetProp("_Name", raw_mol.GetProp("_Name"))
         return repaired
