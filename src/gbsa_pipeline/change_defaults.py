@@ -31,28 +31,9 @@ from gbsa_pipeline.change_defaults_enum import (
     VDWType,
     VelocityGeneration,
 )
-from gbsa_pipeline.change_params import format_gmx_value
+from gbsa_pipeline.change_params import _FIELD_ALIASES, format_gmx_value, mdp_key_to_field
 
 logger = logging.getLogger(__name__)
-
-_FIELD_ALIASES = {
-    "vdw_type": "vdwtype",
-}
-
-
-def _normalise_field_name(key: str) -> str:
-    """Return the internal model field name for a GROMACS parameter key.
-
-    GROMACS MDP files mix plain keys such as ``vdwtype`` with hyphenated keys
-    such as ``cutoff-scheme`` and Python-facing names such as
-    ``cutoff_scheme``. This helper keeps that conversion in one local place so
-    ``from_mapping`` can accept GROMACS-style and Python-style mappings without
-    silently dropping important options. Only compatibility aliases that are
-    already used by this module are included. Unknown names are still rejected
-    by ``from_mapping`` so spelling errors remain visible.
-    """
-    field_name = key.replace("-", "_")
-    return _FIELD_ALIASES.get(field_name, field_name)
 
 
 class GromacsParams(BaseModel):
@@ -230,7 +211,7 @@ class GromacsParams(BaseModel):
         kwargs = {}
 
         for key, value in mapping.items():
-            field_name = _normalise_field_name(key)
+            field_name = mdp_key_to_field(key)
             if field_name not in cls.model_fields:
                 raise KeyError(f"Unknown parameter key: {key}")
             kwargs[field_name] = value

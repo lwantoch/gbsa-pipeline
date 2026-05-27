@@ -4,6 +4,39 @@ from __future__ import annotations
 
 from typing import Any
 
+# Aliases for GROMACS parameter keys whose canonical MDP spelling differs from
+# the Python field name used in GromacsParams.  Only a small number of
+# historically inconsistent names are listed here.
+_FIELD_ALIASES: dict[str, str] = {
+    "vdw_type": "vdwtype",
+}
+
+
+def mdp_key_to_field(key: str) -> str:
+    """Convert a GROMACS MDP key to a Python model field name.
+
+    GROMACS uses hyphens (e.g. ``cutoff-scheme``); Python fields use
+    underscores.  A small alias table handles the rare keys whose canonical
+    GROMACS spelling differs from the field name used in ``GromacsParams``
+    (e.g. ``vdwtype`` → ``vdw_type`` field).
+
+    Used by ``GromacsParams.from_mapping`` so callers can pass both
+    GROMACS-style and Python-style keys without silent failures.
+    """
+    field_name = key.replace("-", "_")
+    return _FIELD_ALIASES.get(field_name, field_name)
+
+
+def field_to_mdp_key(field: str) -> str:
+    """Convert a Python field name to a comparison-safe GROMACS MDP key.
+
+    Returns a lowercase, hyphen-separated key for comparison and deduplication.
+    This is used when merging BSS-generated MDP configs with local overrides
+    where the same logical parameter may appear with different spelling
+    variants (e.g. ``DispCorr``, ``dispcorr``, ``disp_corr``).
+    """
+    return field.strip().lower().replace("_", "-")
+
 
 def _leading_ws(s: str) -> str:
     """Return the leading whitespace of `s`."""
