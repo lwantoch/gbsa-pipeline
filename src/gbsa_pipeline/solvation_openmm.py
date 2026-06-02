@@ -39,13 +39,19 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import IO, TYPE_CHECKING, Any
 
-import numpy as np
 import parmed as pmd
 from openmm import Vec3
 from openmm import unit as mm_unit
-from openmm.app import ForceField, Modeller, NoCutoff, PDBFile
-from scipy.spatial import cKDTree
+from openmm.app import ForceField, Modeller, NoCutoff
 
+from gbsa_pipeline._gro_io import _parse_gro
+from gbsa_pipeline._openmm_utils import (
+    _heavy_atom_coords,
+    _load_waters_with_hydrogens,
+    _oxygen_atom_entries,
+    _write_modeller_pdb,
+)
+from gbsa_pipeline._spatial import _find_clashing_residues
 from gbsa_pipeline.solvation_box import BoxShape, SolvationParams, WaterModel
 
 if TYPE_CHECKING:
@@ -273,20 +279,14 @@ def relax_solvated_water(gro: Path, top: Path, work_dir: Path, *, nsteps: int = 
     """
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    lines = gro.read_text().splitlines()
-    n_atoms = int(lines[1].strip())
-
-    nonwater_atoms: list[int] = []
-    for i, line in enumerate(lines[2 : 2 + n_atoms], start=1):
-        # GRO residue-name field: columns 5-9 (0-based). Lines shorter than
-        # 10 characters are malformed and skipped rather than crashing.
-        if len(line) >= len("    1RES  ATM") and line[5:10].strip() not in _WATER_RESIDUES:
-            nonwater_atoms.append(i)
+    atoms = _parse_gro(gro)
+    all_indices = [a.atom_idx for a in atoms]
+    nonwater_atoms = [a.atom_idx for a in atoms if a.res_name not in _WATER_RESIDUES]
 
     ndx = work_dir / "freeze.ndx"
     with ndx.open("w") as f:
         f.write("[ System ]\n")
-        _write_ndx_indices(f, range(1, n_atoms + 1))
+        _write_ndx_indices(f, all_indices)
         f.write("\n[ non-Water ]\n")
         _write_ndx_indices(f, nonwater_atoms)
 
@@ -379,60 +379,26 @@ def _restore_crystal_waters_before_solvation(
         logger.debug("Crystal water file not found: %s.", crystal_waters_pdb)
         return None
 
-    water_pdb = PDBFile(str(crystal_waters_pdb))
-    water_modeller = Modeller(water_pdb.topology, water_pdb.positions)
+    water_modeller = _load_waters_with_hydrogens(crystal_waters_pdb, forcefield)
 
-    atoms_before = water_modeller.topology.getNumAtoms()
-    water_modeller.addHydrogens(forcefield)
-    atoms_after = water_modeller.topology.getNumAtoms()
-
-    # Build an array of existing heavy-atom positions (protein + ligand) in nm.
-    existing_positions = list(modeller.positions.value_in_unit(mm_unit.nanometer))
-    existing_heavy = np.array(
-        [
-            pos
-            for atom, pos in zip(modeller.topology.atoms(), existing_positions)
-            if atom.element is not None and atom.element.symbol != "H"
-        ]
+    clashing = _find_clashing_residues(
+        _oxygen_atom_entries(water_modeller),
+        _heavy_atom_coords(modeller),
+        _CLASH_CUTOFF_NM,
     )
-
-    # Identify which water residues (by oxygen position) clash with existing atoms.
-    clashing_residues: set[Any] = set()
-    if existing_heavy.size > 0:
-        tree = cKDTree(existing_heavy)
-        water_positions_nm = list(water_modeller.positions.value_in_unit(mm_unit.nanometer))
-        for atom, pos in zip(water_modeller.topology.atoms(), water_positions_nm):
-            if atom.element is not None and atom.element.symbol == "O":
-                hits = tree.query_ball_point(pos, r=_CLASH_CUTOFF_NM)
-                if hits:
-                    clashing_residues.add(atom.residue)
-
-    if clashing_residues:
+    if clashing:
         logger.debug(
             "Dropping %d crystal water(s) clashing with existing atoms (cutoff %.2f nm).",
-            len(clashing_residues),
+            len(clashing),
             _CLASH_CUTOFF_NM,
         )
-        water_modeller.delete(list(clashing_residues))
+        water_modeller.delete(list(clashing))
 
     n_restored = water_modeller.topology.getNumResidues()
-    output_pdb.parent.mkdir(parents=True, exist_ok=True)
-    with output_pdb.open("w", encoding="utf-8") as handle:
-        PDBFile.writeFile(
-            water_modeller.topology,
-            water_modeller.positions,
-            handle,
-            keepIds=True,
-        )
-
+    _write_modeller_pdb(water_modeller, output_pdb)
     modeller.add(water_modeller.topology, water_modeller.positions)
 
-    logger.debug(
-        "Restored %d crystal water(s) with OpenMM hydrogens (%d -> %d atoms).",
-        n_restored,
-        atoms_before,
-        atoms_after,
-    )
+    logger.debug("Restored %d crystal water(s).", n_restored)
     return output_pdb
 
 
