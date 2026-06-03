@@ -22,7 +22,7 @@ def _strip_hetatm(receptor_pdb: Path, dest: Path) -> Path:
     Docking receptors should only contain protein atoms anyway.
     """
     lines = receptor_pdb.read_text(encoding="utf-8").splitlines(keepends=True)
-    kept = [l for l in lines if not l.startswith("HETATM")]
+    kept = [line for line in lines if not line.startswith("HETATM")]
     dest.write_text("".join(kept), encoding="utf-8")
     return dest
 
@@ -66,7 +66,7 @@ def convert_receptor_pdb_to_pdbqt(
     # HETATM with the same residue number as a protein ATOM don't cause errors.
     pdb_for_meeko = _strip_hetatm(receptor_pdb, output_path.parent / f"{receptor_pdb.stem}_protein_only.pdb")
 
-    def _run_meeko(extra_args: list[str] = []) -> CompletedProcess[str]:  # noqa: B006
+    def _run_meeko(extra_args: list[str] = []) -> tuple[CompletedProcess[str], list[str]]:  # noqa: B006
         _cmd = [
             mk_prepare_receptor_binary,
             "--read_pdb",
@@ -76,7 +76,7 @@ def convert_receptor_pdb_to_pdbqt(
             "-p",
             *extra_args,
         ]
-        return run(_cmd, capture_output=True, text=True, check=False)  # noqa: S603
+        return run(_cmd, capture_output=True, text=True, check=False), _cmd  # noqa: S603
 
     LOGGER.info(
         "Preparing receptor with Meeko: %s -> %s",
@@ -84,7 +84,7 @@ def convert_receptor_pdb_to_pdbqt(
         output_path.name,
     )
 
-    process = _run_meeko()
+    process, cmd = _run_meeko()
 
     # Cross-chain disulfide bonds cause "Expected N paddings … got 0". Retry
     # with --set_template {chain}:{res}=CYX so Meeko uses the cystine template.
@@ -96,9 +96,7 @@ def convert_receptor_pdb_to_pdbqt(
                 "Meeko: cross-chain CYS bonds detected (%s), retrying with --set_template %s",
                 ", ".join(residues), template_arg,
             )
-            process = _run_meeko(["--set_template", template_arg])
-
-    cmd = [mk_prepare_receptor_binary, "--read_pdb", str(pdb_for_meeko), "-o", str(output_base), "-p"]
+            process, cmd = _run_meeko(["--set_template", template_arg])
 
     _write_process_log(
         log_path,
