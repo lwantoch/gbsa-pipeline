@@ -1,7 +1,8 @@
-"""Validated solvation-box parameters and BioSimSpace solvation helper."""
+"""Validated solvation-box parameters, shared result types, and BSS solvation helper."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Self
 
@@ -9,6 +10,32 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@dataclass(frozen=True)
+class SolvatedComplex:
+    """Solvated protein-ligand complex produced by a solvation helper.
+
+    Carries the paths to the GROMACS files written for inspection, checkpointing,
+    and direct loading by downstream MD stages. The optional ``parmed_structure``
+    is populated by the OpenMM-based solvation path only; it is ``None`` when the
+    GROMACS-native BSS path is used. Downstream code should consume only
+    ``gro_file`` and ``top_file`` unless it explicitly needs the in-memory object.
+    """
+
+    gro_file: Path
+    top_file: Path
+    parmed_structure: Any = field(default=None, hash=False, compare=False, repr=False)
+
+    def load_bss(self) -> Any:
+        """Load this complex as a BioSimSpace System for MD stages."""
+        if not self.gro_file.exists() or not self.top_file.exists():
+            raise FileNotFoundError(
+                f"SolvatedComplex files not found: {self.gro_file}, {self.top_file}."
+            )
+        import BioSimSpace as BSS  # noqa: PLC0415
+
+        return BSS.IO.readMolecules([str(self.gro_file), str(self.top_file)])
 
 
 class WaterModel(StrEnum):
@@ -28,20 +55,43 @@ class WaterModel(StrEnum):
     SPCE = "spce"
     TIP5P = "tip5p"
 
+    @property
+    def gmx_water_name(self) -> str:
+        """String accepted by gmx solvate / Modeller.addSolvent(model=...)."""
+        _names = {
+            WaterModel.TIP3P: "tip3p",
+            WaterModel.TIP4P: "tip4pew",
+            WaterModel.SPC: "spce",
+            WaterModel.SPCE: "spce",
+            WaterModel.TIP5P: "tip5p",
+        }
+        return _names[self]
+
+    @property
+    def openmm_xml(self) -> str:
+        """OpenMM force-field XML file for this water model."""
+        _xml = {
+            WaterModel.TIP3P: "amber14/tip3p.xml",
+            WaterModel.TIP4P: "amber14/tip4pew.xml",
+            WaterModel.SPC: "amber14/spce.xml",
+            WaterModel.SPCE: "amber14/spce.xml",
+            WaterModel.TIP5P: "tip5p.xml",
+        }
+        return _xml[self]
+
 
 class BoxShape(StrEnum):
-    """Supported solvent-box shapes.
-
-    The enum values are the user-facing strings accepted by the solvation
-    parameter model. Execution code should consume this enum directly instead
-    of repeating string normalization in multiple places. This keeps validation
-    at the configuration boundary and makes invalid values fail before solvation
-    starts. Only shapes implemented by the downstream solvation helpers should
-    be exposed here.
-    """
+    """Supported solvent-box shapes."""
 
     CUBIC = "cubic"
     TRUNCATED_OCTAHEDRON = "truncated_octahedron"
+
+    @property
+    def gmx_bt(self) -> str:
+        """Value for gmx editconf -bt."""
+        if self is BoxShape.TRUNCATED_OCTAHEDRON:
+            return "octahedron"
+        return self.value
 
 
 class SolvationParams(BaseModel):
@@ -190,27 +240,4 @@ def _make_bss_box(bss: Any, shape: BoxShape, size_nm: float) -> tuple[Any, Any]:
 
 
 def _get_bss_solvent_function(bss: Any, water_model: WaterModel) -> Any:
-    """Return the BioSimSpace solvent function for a validated water model.
-
-    The parameter model stores water models as ``WaterModel`` values, while
-    BioSimSpace exposes solvent builders as functions on ``BSS.Solvent``. This
-    helper keeps that API mapping local to the BioSimSpace compatibility path.
-    It avoids string-indexed dictionaries so mypy can still track enum use in
-    the OpenMM solvation implementation. Unsupported models fail explicitly.
-    """
-    if water_model is WaterModel.TIP3P:
-        return bss.Solvent.tip3p
-
-    if water_model is WaterModel.TIP4P:
-        return bss.Solvent.tip4p
-
-    if water_model is WaterModel.SPC:
-        return bss.Solvent.spc
-
-    if water_model is WaterModel.SPCE:
-        return bss.Solvent.spce
-
-    if water_model is WaterModel.TIP5P:
-        return bss.Solvent.tip5p
-
-    raise ValueError(f"Unsupported water model: {water_model!s}")
+    return getattr(bss.Solvent, water_model.value)
