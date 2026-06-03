@@ -98,6 +98,10 @@ class ParametrizationInput(BaseModel):
         Path to the protein PDB file. Must exist.
     ligand_sdf:
         Path to the ligand SDF file with embedded 3-D coordinates. Must exist.
+    cofactor_sdfs:
+        Paths to cofactor SDF files (e.g. metal-chelating ligands, cofactors).
+        Each must contain embedded 3-D coordinates. GAFF2 parameters and AM1-BCC
+        charges are assigned automatically. Defaults to no cofactors.
     config:
         Force field and charge method selection. Defaults to
         ``ParametrizationConfig()`` (ff14SB + GAFF2 + AM1-BCC).
@@ -113,6 +117,7 @@ class ParametrizationInput(BaseModel):
 
     protein_pdb: Path
     ligand_sdf: Path
+    cofactor_sdfs: tuple[Path, ...] = ()
     config: ParametrizationConfig = Field(default_factory=ParametrizationConfig)
     net_charge: int | None = None
     work_dir: Path | None = None
@@ -123,6 +128,15 @@ class ParametrizationInput(BaseModel):
         if not path.exists():
             raise ValueError(f"File not found: {path}")
         return path
+
+    @field_validator("cofactor_sdfs", mode="before")
+    @classmethod
+    def _check_cofactor_sdfs(cls, paths: Any) -> tuple[Path, ...]:
+        result = tuple(Path(p) for p in paths)
+        missing = [p for p in result if not p.exists()]
+        if missing:
+            raise ValueError("Cofactor SDF files not found: " + ", ".join(str(p) for p in missing))
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +335,31 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     ligand.assign_partial_charges(**kwargs)
     logger.debug("Partial charges assigned.")
 
+    # --- Cofactors -----------------------------------------------------
+    cofactors: list[Molecule] = []
+    for cof_path in inp.cofactor_sdfs:
+        logger.debug("Loading cofactor SDF: %s …", cof_path)
+        cof = Molecule.from_file(str(cof_path))
+        if not cof.conformers:
+            raise ValueError(
+                f"Cofactor SDF '{cof_path}' contains no 3-D conformers. "
+                "Provide an SDF file with embedded 3-D coordinates."
+            )
+        logger.debug(
+            "Cofactor loaded (%d atoms, %d conformers).",
+            cof.n_atoms,
+            len(cof.conformers),
+        )
+        logger.debug("Assigning partial charges to cofactor (method=%s) …", inp.config.charge_method.value)
+        cof.assign_partial_charges(
+            partial_charge_method=inp.config.charge_method.value,
+            normalize_partial_charges=True,
+            use_conformers=cof.conformers,
+        )
+        cofactors.append(cof)
+    if cofactors:
+        logger.debug("Loaded and parametrized %d cofactor(s).", len(cofactors))
+
     # --- Force field ---------------------------------------------------
     protein_xmls = _PROTEIN_FF_XML[inp.config.protein_ff]
     extra_xmls = [str(p) for p in inp.config.extra_ff_files]
@@ -337,7 +376,7 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
         _GAFF_FF_VERSION[inp.config.ligand_ff],
     )
     gaff = GAFFTemplateGenerator(
-        molecules=[ligand],
+        molecules=[ligand, *cofactors],
         forcefield=_GAFF_FF_VERSION[inp.config.ligand_ff],
         cache=None,
     )
@@ -347,6 +386,8 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     logger.debug("Combining protein+ligand topology …")
     modeller = Modeller(protein_modeller.topology, protein_modeller.positions)
     modeller.add(ligand.to_topology().to_openmm(), ligand.conformers[0].to_openmm())
+    for cof in cofactors:
+        modeller.add(cof.to_topology().to_openmm(), cof.conformers[0].to_openmm())
     logger.debug("Combined dry topology: %d atoms.", modeller.topology.getNumAtoms())
 
     logger.debug("Creating OpenMM system (may take a moment) …")
