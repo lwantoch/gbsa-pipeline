@@ -6,6 +6,7 @@ import contextlib
 import logging
 import pickle
 import re
+import shutil
 import subprocess
 import tempfile
 import warnings
@@ -30,19 +31,67 @@ PathLike = Union[str, Path]
 
 logger = logging.getLogger(__name__)
 
+PDB_ELEMENT_START = 76
+PDB_ELEMENT_END = 78
+PDB_ATOM_NAME_WIDTH = 4
+THREE_CHAR_ATOM_NAME_LENGTH = 3
+MIN_GREEK_ATOM_NAME_LENGTH = 2
+MIN_PDBQT_ATOM_FIELDS = 9
+MIN_PDBQT_BOND_FIELDS = 4
+
 # ---------------------------------------------------------------------------
 # Mol2 cap-stripping helpers (shared between tleap and legacy XML paths)
 # ---------------------------------------------------------------------------
 
 # GAFF nitrogen and carbon atom type sets, used to detect ACE/NME cap atoms.
 _GAFF_N_TYPES = {
-    "n", "n1", "n2", "n3", "n4", "na", "nb", "nc", "nd",
-    "nh", "no", "ns", "nt", "nu", "nv",
+    "n",
+    "n1",
+    "n2",
+    "n3",
+    "n4",
+    "na",
+    "nb",
+    "nc",
+    "nd",
+    "nh",
+    "no",
+    "ns",
+    "nt",
+    "nu",
+    "nv",
 }
 _GAFF_C_TYPES = {
-    "c", "ca", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8",
-    "cc", "cd", "ce", "cf", "cg", "ch", "ci", "ck", "cm", "cn",
-    "co", "cp", "cq", "cr", "cu", "cv", "cw", "cx", "cy", "cz",
+    "c",
+    "ca",
+    "c1",
+    "c2",
+    "c3",
+    "c4",
+    "c5",
+    "c6",
+    "c7",
+    "c8",
+    "cc",
+    "cd",
+    "ce",
+    "cf",
+    "cg",
+    "ch",
+    "ci",
+    "ck",
+    "cm",
+    "cn",
+    "co",
+    "cp",
+    "cq",
+    "cr",
+    "cu",
+    "cv",
+    "cw",
+    "cx",
+    "cy",
+    "cz",
 }
 
 # AMBER ff14SB backbone atom types for residue templates.
@@ -64,23 +113,38 @@ def _pdb_sidechain_names_by_depth(protein_pdb: Path, resname: str) -> dict[tuple
     """Return a mapping (element, depth_from_CA) → [atom_names] for a residue in the PDB."""
     pdb_atoms: list[tuple[str, str]] = []
     for line in protein_pdb.read_text().splitlines():
-        if not (line.startswith("ATOM") or line.startswith("HETATM")):
+        if not line.startswith(("ATOM", "HETATM")):
             continue
         rname = line[17:20].strip()
         if rname != resname:
             continue
         aname = line[12:16].strip()
-        element = line[76:78].strip() if len(line) >= 78 else aname[:1]
+        element = line[PDB_ELEMENT_START:PDB_ELEMENT_END].strip() if len(line) >= PDB_ELEMENT_END else aname[:1]
         pdb_atoms.append((aname, element))
 
     backbone_names = {
-        "N", "H", "CA", "HA", "C", "O", "HN", "1H", "2H", "3H",
-        "H1", "H2", "H3", "OXT", "HB", "HB2", "HB3",
+        "N",
+        "H",
+        "CA",
+        "HA",
+        "C",
+        "O",
+        "HN",
+        "1H",
+        "2H",
+        "3H",
+        "H1",
+        "H2",
+        "H3",
+        "OXT",
+        "HB",
+        "HB2",
+        "HB3",
     }
     greek = {"A": 0, "B": 1, "G": 2, "D": 3, "E": 4, "Z": 5, "H": 6}
     depth: dict[str, int] = {"CA": 0}
     for aname, _ in pdb_atoms:
-        if len(aname) >= 2 and aname[1:2].upper() in greek:
+        if len(aname) >= MIN_GREEK_ATOM_NAME_LENGTH and aname[1:2].upper() in greek:
             depth[aname] = greek[aname[1:2].upper()]
         else:
             depth[aname] = 0
@@ -121,19 +185,26 @@ def _strip_mol2_dipeptide_caps(
     atoms: dict[int, dict] = {}
     for line in sections.get("ATOM", []):
         parts = line.split()
-        if len(parts) < 9:
+        if len(parts) < MIN_PDBQT_ATOM_FIELDS:
             continue
         aid = int(parts[0])
         atoms[aid] = {
-            "id": aid, "name": parts[1], "x": parts[2], "y": parts[3], "z": parts[4],
-            "type": parts[5], "subst_id": parts[6], "subst_name": parts[7], "charge": parts[8],
+            "id": aid,
+            "name": parts[1],
+            "x": parts[2],
+            "y": parts[3],
+            "z": parts[4],
+            "type": parts[5],
+            "subst_id": parts[6],
+            "subst_name": parts[7],
+            "charge": parts[8],
         }
 
     bonds: list[tuple[int, int, str]] = []
     adj: dict[int, list[int]] = {a: [] for a in atoms}
     for line in sections.get("BOND", []):
         parts = line.split()
-        if len(parts) < 4:
+        if len(parts) < MIN_PDBQT_BOND_FIELDS:
             continue
         a1, a2, bt = int(parts[1]), int(parts[2]), parts[3]
         bonds.append((a1, a2, bt))
@@ -160,11 +231,8 @@ def _strip_mol2_dipeptide_caps(
         if backbone_n_id is not None:
             break
 
-    if backbone_n_id is None:
-        raise ValueError(
-            f"Could not identify backbone N in {mol2_path}. "
-            "Expected a capped dipeptide (ACE-RES-NME)."
-        )
+    if backbone_n_id is None or ace_cap_c_id is None:
+        raise ValueError(f"Could not identify backbone N in {mol2_path}. Expected a capped dipeptide (ACE-RES-NME).")
 
     # BFS to collect ACE cap atoms.
     ace_atoms: set[int] = set()
@@ -196,12 +264,15 @@ def _strip_mol2_dipeptide_caps(
                 backbone_c_id = nb
                 backbone_o_id = o_neighbors[0]
                 break
-    if backbone_c_id is None:
+    if backbone_c_id is None or backbone_o_id is None:
         raise ValueError(f"Could not identify backbone C in {mol2_path}.")
 
     nme_cap_n_id = next(
-        (nb for nb in adj[backbone_c_id]
-         if nb != backbone_ca_id and nb != backbone_o_id and atoms[nb]["type"].lower() in _GAFF_N_TYPES),
+        (
+            nb
+            for nb in adj[backbone_c_id]
+            if nb not in (backbone_ca_id, backbone_o_id) and atoms[nb]["type"].lower() in _GAFF_N_TYPES
+        ),
         None,
     )
     nme_atoms: set[int] = set()
@@ -220,26 +291,28 @@ def _strip_mol2_dipeptide_caps(
     core_ids = [aid for aid in sorted(atoms) if aid not in cap_atoms]
 
     backbone_ha_id = next(
-        (nb for nb in adj[backbone_ca_id]
-         if atoms[nb]["type"].lower() == "h1" and nb not in cap_atoms),
+        (nb for nb in adj[backbone_ca_id] if atoms[nb]["type"].lower() == "h1" and nb not in cap_atoms),
         None,
     )
     backbone_h_id = next(
-        (nb for nb in adj[backbone_n_id]
-         if atoms[nb]["type"].lower() in {"hn", "h"} and nb not in cap_atoms),
+        (nb for nb in adj[backbone_n_id] if atoms[nb]["type"].lower() in {"hn", "h"} and nb not in cap_atoms),
         None,
     )
     backbone_cb_id = next(
-        (nb for nb in adj[backbone_ca_id]
-         if nb != backbone_n_id and nb != backbone_c_id and nb not in cap_atoms
-         and atoms[nb]["type"].lower() == "c3" and nb != backbone_ha_id),
+        (
+            nb
+            for nb in adj[backbone_ca_id]
+            if nb not in (backbone_n_id, backbone_c_id)
+            and nb not in cap_atoms
+            and atoms[nb]["type"].lower() == "c3"
+            and nb != backbone_ha_id
+        ),
         None,
     )
     backbone_hb_ids: list[int] = []
     if backbone_cb_id is not None:
         backbone_hb_ids = [
-            nb for nb in adj[backbone_cb_id]
-            if atoms[nb]["type"].lower() in {"h1", "hc", "hx"} and nb not in cap_atoms
+            nb for nb in adj[backbone_cb_id] if atoms[nb]["type"].lower() in {"h1", "hc", "hx"} and nb not in cap_atoms
         ]
 
     rename: dict[int, tuple[str, str]] = {}
@@ -312,9 +385,7 @@ def _strip_mol2_dipeptide_caps(
                 pdb_names_used.add(pdb_name)
 
     n_atoms = len(core_ids)
-    core_bond_set = [
-        (a1, a2, bt) for a1, a2, bt in bonds if a1 not in cap_atoms and a2 not in cap_atoms
-    ]
+    core_bond_set = [(a1, a2, bt) for a1, a2, bt in bonds if a1 not in cap_atoms and a2 not in cap_atoms]
     n_bonds = len(core_bond_set)
     new_id: dict[int, int] = {old: i + 1 for i, old in enumerate(core_ids)}
 
@@ -364,7 +435,7 @@ def _write_dry_protein_pdb(protein_pdb: Path, output_pdb: Path) -> Path:
     AMBER ff14SB (OC1→O, OC2→OXT, ILE CD→CD1). H atoms are stripped so tleap
     re-adds them with correct ff14SB names.
     """
-    _AMBER_RENAMES: dict[tuple[str, str], str] = {
+    amber_renames: dict[tuple[str, str], str] = {
         ("OC1", ""): "O",
         ("OC2", ""): "OXT",
         ("CD", "ILE"): "CD1",
@@ -374,22 +445,19 @@ def _write_dry_protein_pdb(protein_pdb: Path, output_pdb: Path) -> Path:
         atom_name = line[12:16].strip()
         resname = line[17:20].strip().upper()
         # element column (cols 77-78, 1-indexed) gives definitive H detection.
-        element = line[76:78].strip().upper() if len(line) > 76 else ""
+        element = line[PDB_ELEMENT_START:PDB_ELEMENT_END].strip().upper() if len(line) > PDB_ELEMENT_START else ""
         if element == "H" or (not element and atom_name and atom_name[0] == "H"):
             return ""  # strip hydrogen
-        new_name = (
-            _AMBER_RENAMES.get((atom_name, resname))
-            or _AMBER_RENAMES.get((atom_name, ""))
-        )
+        new_name = amber_renames.get((atom_name, resname)) or amber_renames.get((atom_name, ""))
         if new_name is None:
             return line
         # Rewrite cols 13-16 (atom name field, 1-indexed) preserving all others.
         n = len(new_name)
-        if n >= 4:
-            padded = new_name[:4]
-        elif n == 3:
+        if n >= PDB_ATOM_NAME_WIDTH:
+            padded = new_name[:PDB_ATOM_NAME_WIDTH]
+        elif n == THREE_CHAR_ATOM_NAME_LENGTH:
             padded = " " + new_name
-        elif n == 2:
+        elif n == MIN_GREEK_ATOM_NAME_LENGTH:
             padded = " " + new_name + " "
         else:
             padded = " " + new_name + "  "
@@ -426,13 +494,24 @@ def _compute_net_charge_from_sdf(sdf_path: Path) -> int:
     """Return the total formal charge of the first molecule in an SDF file."""
     try:
         from rdkit import Chem  # noqa: PLC0415
+
         supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False)
         mol = next((m for m in supplier if m is not None), None)
         if mol is None:
             return 0
         return sum(atom.GetFormalCharge() for atom in mol.GetAtoms())
-    except Exception:
+    # RDKit suppliers can fail with backend-specific exception classes; the
+    # safest fallback here is to treat an unreadable SDF as neutral.
+    except Exception:  # noqa: BLE001
         return 0
+
+
+def _resolve_executable(name: str) -> str:
+    """Return an absolute executable path resolved from the active environment."""
+    executable = shutil.which(name)
+    if executable is None:
+        raise RuntimeError(f"Required executable not found on PATH: {name}")
+    return executable
 
 
 def _run_antechamber(sdf_path: Path, work_dir: Path, net_charge: int | None) -> tuple[Path, Path]:
@@ -443,33 +522,53 @@ def _run_antechamber(sdf_path: Path, work_dir: Path, net_charge: int | None) -> 
     mol2_out = work_dir / "antechamber.mol2"
     frcmod_out = work_dir / "antechamber.frcmod"
 
-    ante_result = subprocess.run(
+    ante_result = subprocess.run(  # noqa: S603
         [
-            "antechamber",
-            "-i", str(sdf_path.resolve()), "-fi", "sdf",
-            "-o", str(mol2_out), "-fo", "mol2",
-            "-c", "bcc", "-s", "2", "-nc", str(net_charge),
-            "-at", "gaff2",
+            _resolve_executable("antechamber"),
+            "-i",
+            str(sdf_path.resolve()),
+            "-fi",
+            "sdf",
+            "-o",
+            str(mol2_out),
+            "-fo",
+            "mol2",
+            "-c",
+            "bcc",
+            "-s",
+            "2",
+            "-nc",
+            str(net_charge),
+            "-at",
+            "gaff2",
         ],
         capture_output=True,
         cwd=str(work_dir),
+        text=True,
+        check=False,
     )
     if ante_result.returncode != 0 or not mol2_out.exists():
-        raise RuntimeError(
-            f"antechamber failed for {sdf_path.name}:\n"
-            f"{ante_result.stderr.decode()}\n{ante_result.stdout.decode()}"
-        )
+        raise RuntimeError(f"antechamber failed for {sdf_path.name}:\n{ante_result.stderr}\n{ante_result.stdout}")
 
-    parmchk_result = subprocess.run(
-        ["parmchk2", "-s", "2", "-i", str(mol2_out), "-f", "mol2", "-o", str(frcmod_out)],
+    parmchk_result = subprocess.run(  # noqa: S603
+        [
+            _resolve_executable("parmchk2"),
+            "-s",
+            "2",
+            "-i",
+            str(mol2_out),
+            "-f",
+            "mol2",
+            "-o",
+            str(frcmod_out),
+        ],
         capture_output=True,
         cwd=str(work_dir),
+        text=True,
+        check=False,
     )
     if parmchk_result.returncode != 0 or not frcmod_out.exists():
-        raise RuntimeError(
-            f"parmchk2 failed for {sdf_path.name}:\n"
-            f"{parmchk_result.stderr.decode()}"
-        )
+        raise RuntimeError(f"parmchk2 failed for {sdf_path.name}:\n{parmchk_result.stderr}")
 
     return mol2_out, frcmod_out
 
@@ -555,10 +654,12 @@ def _write_tleap_script(
         parts += f" mol_cof{i}"
     lines.append(f"mol = combine {{{parts}}}")
 
-    lines.extend([
-        f"saveAmberParm mol {output_prefix}.prmtop {output_prefix}.inpcrd",
-        "quit",
-    ])
+    lines.extend(
+        [
+            f"saveAmberParm mol {output_prefix}.prmtop {output_prefix}.inpcrd",
+            "quit",
+        ]
+    )
 
     script_path = output_prefix.parent / "tleap.in"
     script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -567,12 +668,14 @@ def _write_tleap_script(
 
 def _run_tleap(script_path: Path, work_dir: Path) -> None:
     """Run tleap and raise RuntimeError on failure."""
-    result = subprocess.run(
-        ["tleap", "-f", str(script_path)],
+    result = subprocess.run(  # noqa: S603
+        [_resolve_executable("tleap"), "-f", str(script_path)],
         capture_output=True,
         cwd=str(work_dir),
+        text=True,
+        check=False,
     )
-    output = (result.stdout + result.stderr).decode()
+    output = result.stdout + result.stderr
     if result.returncode != 0:
         raise RuntimeError(f"tleap failed (exit {result.returncode}):\n{output}")
     if "FATAL" in output.upper():
@@ -840,9 +943,7 @@ def parametrize(inp: ParametrizationInput) -> ParametrisedComplex:
         Frozen dataclass holding the paths to the output GROMACS files and
         the configuration used.
     """
-    has_frcmod_mol2 = any(
-        p.suffix.lower() in {".frcmod", ".mol2"} for p in inp.config.extra_ff_files
-    )
+    has_frcmod_mol2 = any(p.suffix.lower() in {".frcmod", ".mol2"} for p in inp.config.extra_ff_files)
     if has_frcmod_mol2 or inp.config.leaprc_extra_sources or inp.config.mcpb_tleap_in is not None:
         return _parametrize_tleap(inp)
     return _parametrize_openmm(inp)
@@ -853,9 +954,7 @@ def parametrize(inp: ParametrizationInput) -> ParametrisedComplex:
 # ---------------------------------------------------------------------------
 
 
-def _remap_bond_residue_numbers(
-    bond_commands: list[str], hetatm_resnum_map: dict[int, int]
-) -> list[str]:
+def _remap_bond_residue_numbers(bond_commands: list[str], hetatm_resnum_map: dict[int, int]) -> list[str]:
     """Remap PDB HETATM residue numbers in bond commands to tleap sequential positions.
 
     Modern tleap (teLeap) assigns HETATM residues that follow a gap in the PDB
@@ -910,9 +1009,7 @@ def _parametrize_tleap(inp: ParametrizationInput) -> ParametrisedComplex:
         mcpb_info = _parse_mcpb_tleap_in(inp.config.mcpb_tleap_in)
         source_pdb = mcpb_info["protein_pdb"]
         if source_pdb is None:
-            raise RuntimeError(
-                f"Could not locate loadpdb line in MCPB.py tleap.in: {inp.config.mcpb_tleap_in}"
-            )
+            raise RuntimeError(f"Could not locate loadpdb line in MCPB.py tleap.in: {inp.config.mcpb_tleap_in}")
         add_atom_types_block: str | None = mcpb_info["add_atom_types_block"]
         bond_commands: list[str] = mcpb_info["bond_commands"]
         extra_frcmod_names: list[str] = mcpb_info["extra_frcmod_names"]
@@ -960,7 +1057,9 @@ def _parametrize_tleap(inp: ParametrizationInput) -> ParametrisedComplex:
         try:
             _strip_mol2_dipeptide_caps(mol2, stripped, protein_pdb=source_pdb)
             stripped_mol2s.append(stripped)
-        except Exception as exc:
+        # Mol2 templates come from heterogeneous chemistry tools; this fallback
+        # intentionally keeps already-stripped templates unchanged on any parser failure.
+        except Exception as exc:  # noqa: BLE001
             warnings.warn(f"Cap stripping skipped for {mol2.name}: {exc}", stacklevel=2)
             stripped_mol2s.append(mol2)
 
@@ -1008,8 +1107,7 @@ def _parametrize_tleap(inp: ParametrizationInput) -> ParametrisedComplex:
     inpcrd = work_dir / "complex.inpcrd"
     if not prmtop.exists() or not inpcrd.exists():
         raise RuntimeError(
-            f"tleap did not produce expected output files in {work_dir}. "
-            "Check tleap.in and the tleap output."
+            f"tleap did not produce expected output files in {work_dir}. Check tleap.in and the tleap output."
         )
     struct = pmd.load_file(str(prmtop), str(inpcrd))
     gro_file = work_dir / "complex.gro"
@@ -1105,7 +1203,7 @@ def _write_crystal_waters_pdb(protein_pdb: Path, output_pdb: Path) -> Path | Non
     return output_pdb
 
 
-def _assign_nagl_charges_direct(mol: "Molecule") -> None:  # noqa: F821
+def _assign_nagl_charges_direct(mol: Molecule) -> None:
     """Assign AM1-BCC charges via the openff-nagl GNNModel API, bypassing the toolkit wrapper.
 
     The OpenFF toolkit's NAGL toolkit wrapper may not register in all environments
@@ -1124,7 +1222,6 @@ def _assign_nagl_charges_direct(mol: "Molecule") -> None:  # noqa: F821
     formal_sum = float(sum(a.formal_charge.m for a in mol.atoms))
     charges -= (float(np.sum(charges)) - formal_sum) / len(charges)
     mol.partial_charges = _unit.Quantity(charges, _unit.elementary_charge)
-
 
 
 def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
@@ -1195,7 +1292,9 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
                 normalize_partial_charges=True,
                 use_conformers=cof.conformers,
             )
-        except Exception as exc:
+        # OpenFF charge assignment can fail with toolkit/backend-specific exceptions;
+        # this fallback deliberately catches the broad failure and tries NAGL directly.
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Cofactor charge assignment failed with %s (%s); falling back to NAGL direct API.",
                 inp.config.charge_method.value,
@@ -1241,7 +1340,8 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     system: System = forcefield.createSystem(
         modeller.topology,
         nonbondedMethod=NoCutoff,
-        constraints=None,  # VERY IMPORTANT THIS INFORMATION DOES NOT GET LOST: Constraints None is safe, HBOND fails as the generated top file does not fit with the parameters
+        constraints=None,
+        # VERY IMPORTANT THIS INFORMATION DOES NOT GET LOST: Constraints None is safe, HBOND fails as the generated top file does not fit with the parameters
     )
     logger.debug("OpenMM system created (%d particles).", system.getNumParticles())
 
