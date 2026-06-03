@@ -49,7 +49,7 @@ class DockingRequest(BaseModel):
     seed: int | None = None
     workdir: Path | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
-    extra_rigid_pdbqt: Path | None = None
+    cofactor_sdfs: list[Path] = Field(default_factory=list)
 
     @field_validator("receptor")
     @classmethod
