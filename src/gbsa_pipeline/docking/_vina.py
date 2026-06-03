@@ -133,29 +133,49 @@ class VinaEngine:
         self,
         receptor: Path,
         workdir: Path,
+        extra_rigid_pdbqt: Path | None = None,
     ) -> Path:
         """Return the receptor PDBQT to use for docking.
 
         This helper exists so the engine can accept either a preprepared PDBQT
         receptor or a plain PDB receptor that still needs conversion.
-        The `receptor` parameter is the user-provided input, while `workdir` is
-        required because on-the-fly receptor preparation needs a destination path.
-        We are currently checking only file-type routing here: use PDBQT as-is,
-        prepare PDB via Meeko, and reject anything else explicitly.
+        If ``extra_rigid_pdbqt`` is provided (e.g. a cofactor), its ATOM/HETATM
+        records are appended to the receptor PDBQT so Vina treats them as rigid
+        receptor atoms.
         """
         receptor = Path(receptor).resolve()
 
         if receptor.suffix.lower() == ".pdbqt":
-            return receptor
-
-        if receptor.suffix.lower() == ".pdb":
-            return convert_receptor_pdb_to_pdbqt(
+            base_pdbqt = receptor
+        elif receptor.suffix.lower() == ".pdb":
+            base_pdbqt = convert_receptor_pdb_to_pdbqt(
                 receptor,
                 output_path=workdir / f"{receptor.stem}.pdbqt",
                 mk_prepare_receptor_binary=self.mk_prepare_receptor_binary,
             )
+        else:
+            raise ValueError(f"Unsupported receptor file type for docking: {receptor}")
 
-        raise ValueError(f"Unsupported receptor file type for docking: {receptor}")
+        if extra_rigid_pdbqt is None:
+            return base_pdbqt
+
+        # Append cofactor/extra rigid atoms — strip flexibility records, keep coordinates
+        extra = Path(extra_rigid_pdbqt)
+        if not extra.exists():
+            LOGGER.warning("extra_rigid_pdbqt not found, skipping: %s", extra)
+            return base_pdbqt
+
+        rigid_lines = [
+            line for line in extra.read_text(encoding="utf-8").splitlines(keepends=True)
+            if line.startswith(("ATOM", "HETATM"))
+        ]
+        merged = workdir / f"{base_pdbqt.stem}_with_cofactor.pdbqt"
+        merged.write_text(
+            base_pdbqt.read_text(encoding="utf-8") + "".join(rigid_lines),
+            encoding="utf-8",
+        )
+        LOGGER.info("Appended %d cofactor atoms to receptor PDBQT: %s", len(rigid_lines), merged.name)
+        return merged
 
     def dock(self, request: DockingRequest) -> DockingResult:
         """Run docking for all ligands in the request.
@@ -176,6 +196,7 @@ class VinaEngine:
         receptor_for_docking = self._prepare_receptor_for_docking(
             request.receptor,
             workdir,
+            extra_rigid_pdbqt=request.extra_rigid_pdbqt,
         )
 
         poses: list[DockedPose] = []
