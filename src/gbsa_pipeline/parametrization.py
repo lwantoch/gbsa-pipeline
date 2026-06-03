@@ -636,18 +636,13 @@ def _write_dry_protein_pdb(protein_pdb: Path, output_pdb: Path) -> Path:
 
 def _compute_net_charge_from_sdf(sdf_path: Path) -> int:
     """Return the total formal charge of the first molecule in an SDF file."""
-    try:
-        from rdkit import Chem  # noqa: PLC0415
+    from rdkit import Chem  # noqa: PLC0415
 
-        supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False)
-        mol = next((m for m in supplier if m is not None), None)
-        if mol is None:
-            return 0
-        return sum(atom.GetFormalCharge() for atom in mol.GetAtoms())
-    # RDKit suppliers can fail with backend-specific exception classes; the
-    # safest fallback here is to treat an unreadable SDF as neutral.
-    except Exception:  # noqa: BLE001
-        return 0
+    supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False)
+    mol = next((m for m in supplier if m is not None), None)
+    if mol is None:
+        raise ValueError(f"Could not read any molecule from {sdf_path}")
+    return sum(atom.GetFormalCharge() for atom in mol.GetAtoms())
 
 
 def _resolve_executable(name: str) -> str:
