@@ -30,9 +30,7 @@ class SolvatedComplex:
     def load_bss(self) -> Any:
         """Load this complex as a BioSimSpace System for MD stages."""
         if not self.gro_file.exists() or not self.top_file.exists():
-            raise FileNotFoundError(
-                f"SolvatedComplex files not found: {self.gro_file}, {self.top_file}."
-            )
+            raise FileNotFoundError(f"SolvatedComplex files not found: {self.gro_file}, {self.top_file}.")
         import BioSimSpace as BSS  # noqa: PLC0415
 
         return BSS.IO.readMolecules([str(self.gro_file), str(self.top_file)])

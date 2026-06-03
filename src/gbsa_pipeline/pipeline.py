@@ -10,8 +10,7 @@ import BioSimSpace as BSS
 
 from gbsa_pipeline.md import run_heating, run_production
 from gbsa_pipeline.parametrization import export_gromacs_top_gro, parametrize
-from gbsa_pipeline.solvation_box import SolvationParams
-from gbsa_pipeline.solvation_box import SolvatedComplex
+from gbsa_pipeline.solvation_box import SolvatedComplex, SolvationParams
 from gbsa_pipeline.solvation_openmm import solvate_openmm
 
 if TYPE_CHECKING:
