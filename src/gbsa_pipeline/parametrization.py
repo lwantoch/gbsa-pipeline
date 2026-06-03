@@ -573,6 +573,18 @@ def _run_antechamber(sdf_path: Path, work_dir: Path, net_charge: int | None) -> 
     return mol2_out, frcmod_out
 
 
+_PROTEIN_FF_LEAPRC: dict[ProteinFF, str] = {
+    ProteinFF.FF14SB: "leaprc.protein.ff14SB",
+    ProteinFF.FF19SB: "leaprc.protein.ff19SB",
+    ProteinFF.FF99SB: "leaprc.protein.ff99SBildn",
+}
+
+_LIGAND_FF_LEAPRC: dict[LigandFF, str] = {
+    LigandFF.GAFF: "leaprc.gaff",
+    LigandFF.GAFF2: "leaprc.gaff2",
+}
+
+
 def _write_tleap_script(
     protein_pdb: Path,
     protein_mol2s: list[Path],
@@ -586,6 +598,8 @@ def _write_tleap_script(
     bond_commands: list[str] | None = None,
     extra_frcmod_names: list[str] | None = None,
     leaprc_extra_sources: tuple[str, ...] | list[str] | None = None,
+    protein_ff: ProteinFF = ProteinFF.FF14SB,
+    ligand_ff: LigandFF = LigandFF.GAFF2,
 ) -> Path:
     """Write a tleap script that combines protein + ligand + cofactors.
 
@@ -604,8 +618,8 @@ def _write_tleap_script(
     leaprc_extra_sources = leaprc_extra_sources or []
 
     lines = [
-        "source leaprc.protein.ff14SB",
-        "source leaprc.gaff2",
+        f"source {_PROTEIN_FF_LEAPRC[protein_ff]}",
+        f"source {_LIGAND_FF_LEAPRC[ligand_ff]}",
     ]
 
     # Additional leaprc files (e.g. phosphorylated amino acids, custom residues).
@@ -1099,6 +1113,8 @@ def _parametrize_tleap(inp: ParametrizationInput) -> ParametrisedComplex:
         bond_commands=bond_commands,
         extra_frcmod_names=extra_frcmod_names,
         leaprc_extra_sources=list(inp.config.leaprc_extra_sources),
+        protein_ff=inp.config.protein_ff,
+        ligand_ff=inp.config.ligand_ff,
     )
     _run_tleap(script, work_dir=work_dir)
 
