@@ -36,7 +36,6 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-from dataclasses import dataclass, field
 from typing import IO, TYPE_CHECKING, Any
 
 import parmed as pmd
@@ -52,7 +51,7 @@ from gbsa_pipeline._openmm_utils import (
     _write_modeller_pdb,
 )
 from gbsa_pipeline._spatial import _find_clashing_residues
-from gbsa_pipeline.solvation_box import BoxShape, SolvationParams, WaterModel
+from gbsa_pipeline.solvation_box import BoxShape, SolvatedComplex, SolvationParams, WaterModel
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,57 +60,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# OpenMM force-field XML files for each water model.
-_WATER_XML: dict[WaterModel, str] = {
-    WaterModel.TIP3P: "amber14/tip3p.xml",
-    WaterModel.TIP4P: "amber14/tip4pew.xml",
-    WaterModel.SPC: "amber14/spce.xml",
-    WaterModel.SPCE: "amber14/spce.xml",
-    WaterModel.TIP5P: "tip5p.xml",
-}
-
-# String name accepted by Modeller.addSolvent(model=...).
-_WATER_NAME: dict[WaterModel, str] = {
-    WaterModel.TIP3P: "tip3p",
-    WaterModel.TIP4P: "tip4pew",
-    WaterModel.SPC: "spce",
-    WaterModel.SPCE: "spce",
-    WaterModel.TIP5P: "tip5p",
-}
-
-
-@dataclass(frozen=True)
-class SolvatedComplex:
-    """Solvated protein-ligand complex produced by :func:`solvate_openmm`.
-
-    Carries both the on-disk GROMACS files written for inspection/checkpointing
-    and the in-memory ParmEd structure so downstream stages can use either path
-    without repeating disk I/O. The object is intentionally small because MD
-    orchestration belongs in a later pipeline layer, not in this solvation
-    helper. The optional in-memory structure is useful when the caller continues
-    in Python immediately, while the files remain the stable interface for
-    BioSimSpace loading and visual inspection.
-    """
-
-    gro_file: Path
-    top_file: Path
-    parmed_structure: Any = field(default=None, hash=False, compare=False, repr=False)
-
-    def load_bss(self) -> Any:
-        """Load this complex as a BioSimSpace System for MD stages.
-
-        Reads from the GROMACS files already written to disk. The returned
-        system is ready for later minimization, equilibration, and production MD
-        helpers. This method intentionally performs only loading and does not
-        start any simulation stage. Missing files are reported explicitly because
-        this object is often used after long integration-test runs.
-        """
-        if not self.gro_file.exists() or not self.top_file.exists():
-            raise FileNotFoundError(f"SolvatedComplex files not found: {self.gro_file}, {self.top_file}.")
-
-        import BioSimSpace as BSS  # noqa: PLC0415
-
-        return BSS.IO.readMolecules([str(self.gro_file), str(self.top_file)])
 
 
 def solvate_openmm(
@@ -157,10 +105,9 @@ def solvate_openmm(
     #    GAFF is already registered with pre-assigned ligand charges,
     #    so AM1-BCC will not re-run.
     # ------------------------------------------------------------------
-    water_xml = _WATER_XML[water_model]
     ff: ForceField = parametrized.forcefield
-    logger.debug("Loading water FF (%s) into existing ForceField …", water_xml)
-    ff.loadFile(water_xml)
+    logger.debug("Loading water FF (%s) into existing ForceField …", water_model.openmm_xml)
+    ff.loadFile(water_model.openmm_xml)
 
     # ------------------------------------------------------------------
     # 3. Build a complete pre-solvation modeller.
@@ -183,7 +130,7 @@ def solvate_openmm(
     # 4. Add bulk solvent and ions via OpenMM Modeller.
     # ------------------------------------------------------------------
     kwargs: dict[str, Any] = {
-        "model": _WATER_NAME[water_model],
+        "model": water_model.gmx_water_name,
         "neutralize": params.neutralize,
     }
     if params.ion_concentration is not None:
