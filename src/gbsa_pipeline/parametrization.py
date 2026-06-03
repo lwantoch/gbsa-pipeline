@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import pickle
+import re
+import subprocess
 import tempfile
 import warnings
 from dataclasses import dataclass, field
@@ -27,6 +29,619 @@ from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
 PathLike = Union[str, Path]
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Mol2 cap-stripping helpers (shared between tleap and legacy XML paths)
+# ---------------------------------------------------------------------------
+
+# GAFF nitrogen and carbon atom type sets, used to detect ACE/NME cap atoms.
+_GAFF_N_TYPES = {
+    "n", "n1", "n2", "n3", "n4", "na", "nb", "nc", "nd",
+    "nh", "no", "ns", "nt", "nu", "nv",
+}
+_GAFF_C_TYPES = {
+    "c", "ca", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8",
+    "cc", "cd", "ce", "cf", "cg", "ch", "ci", "ck", "cm", "cn",
+    "co", "cp", "cq", "cr", "cu", "cv", "cw", "cx", "cy", "cz",
+}
+
+# AMBER ff14SB backbone atom types for residue templates.
+_AMBER_BACKBONE_TYPE = {
+    "backbone_N": "N",
+    "backbone_H": "H",
+    "backbone_CA": "CX",
+    "backbone_HA": "H1",
+    "backbone_CB": "2C",
+    "backbone_HB": "H1",
+    "backbone_C": "C",
+    "backbone_O": "O",
+}
+
+_WATER_RESIDUE_NAMES_SET = {"HOH", "WAT", "TIP3", "TIP3P", "SOL"}
+
+
+def _pdb_sidechain_names_by_depth(protein_pdb: Path, resname: str) -> dict[tuple[str, int], list[str]]:
+    """Return a mapping (element, depth_from_CA) → [atom_names] for a residue in the PDB."""
+    pdb_atoms: list[tuple[str, str]] = []
+    for line in protein_pdb.read_text().splitlines():
+        if not (line.startswith("ATOM") or line.startswith("HETATM")):
+            continue
+        rname = line[17:20].strip()
+        if rname != resname:
+            continue
+        aname = line[12:16].strip()
+        element = line[76:78].strip() if len(line) >= 78 else aname[:1]
+        pdb_atoms.append((aname, element))
+
+    backbone_names = {
+        "N", "H", "CA", "HA", "C", "O", "HN", "1H", "2H", "3H",
+        "H1", "H2", "H3", "OXT", "HB", "HB2", "HB3",
+    }
+    greek = {"A": 0, "B": 1, "G": 2, "D": 3, "E": 4, "Z": 5, "H": 6}
+    depth: dict[str, int] = {"CA": 0}
+    for aname, _ in pdb_atoms:
+        if len(aname) >= 2 and aname[1:2].upper() in greek:
+            depth[aname] = greek[aname[1:2].upper()]
+        else:
+            depth[aname] = 0
+
+    result: dict[tuple[str, int], list[str]] = {}
+    for aname, elem in pdb_atoms:
+        if aname in backbone_names:
+            continue
+        key = (elem.upper(), depth.get(aname, 99))
+        result.setdefault(key, []).append(aname)
+    return result
+
+
+def _strip_mol2_dipeptide_caps(
+    mol2_path: Path,
+    output_mol2: Path,
+    protein_pdb: Path | None = None,
+) -> Path:
+    """Strip ACE/NME caps from a capped-dipeptide mol2 and rename backbone atoms.
+
+    RESP charges are often derived on ACE-RES-NME capped dipeptides. This
+    function removes the cap atoms and renames backbone atoms (N, CA, CB, C, O)
+    to AMBER ff14SB convention so the mol2 can serve as an embedded residue
+    template for tleap. Mol2 files that are already residue templates (e.g.
+    CS1-4 from MCPB.py) will raise ValueError (no ACE cap found), and the
+    caller should fall back to using the original mol2 unchanged.
+    """
+    text = mol2_path.read_text()
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in text.splitlines():
+        if line.startswith("@<TRIPOS>"):
+            current = line[9:].strip()
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(line)
+
+    atoms: dict[int, dict] = {}
+    for line in sections.get("ATOM", []):
+        parts = line.split()
+        if len(parts) < 9:
+            continue
+        aid = int(parts[0])
+        atoms[aid] = {
+            "id": aid, "name": parts[1], "x": parts[2], "y": parts[3], "z": parts[4],
+            "type": parts[5], "subst_id": parts[6], "subst_name": parts[7], "charge": parts[8],
+        }
+
+    bonds: list[tuple[int, int, str]] = []
+    adj: dict[int, list[int]] = {a: [] for a in atoms}
+    for line in sections.get("BOND", []):
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        a1, a2, bt = int(parts[1]), int(parts[2]), parts[3]
+        bonds.append((a1, a2, bt))
+        adj[a1].append(a2)
+        adj[a2].append(a1)
+
+    # Identify backbone N bonded to ACE cap carbonyl C.
+    backbone_n_id = None
+    ace_cap_c_id = None
+    for aid, atom in atoms.items():
+        if atom["type"].lower() not in _GAFF_N_TYPES:
+            continue
+        for nb in adj[aid]:
+            nb_atom = atoms[nb]
+            if nb_atom["type"].lower() not in _GAFF_C_TYPES:
+                continue
+            nb_neighbors = adj[nb]
+            has_o = any(atoms[x]["type"].lower() == "o" for x in nb_neighbors if x != aid)
+            has_methyl = any(atoms[x]["type"].lower() == "c3" for x in nb_neighbors if x != aid)
+            if has_o and has_methyl:
+                backbone_n_id = aid
+                ace_cap_c_id = nb
+                break
+        if backbone_n_id is not None:
+            break
+
+    if backbone_n_id is None:
+        raise ValueError(
+            f"Could not identify backbone N in {mol2_path}. "
+            "Expected a capped dipeptide (ACE-RES-NME)."
+        )
+
+    # BFS to collect ACE cap atoms.
+    ace_atoms: set[int] = set()
+    queue = [ace_cap_c_id]
+    while queue:
+        node = queue.pop()
+        if node in ace_atoms or node == backbone_n_id:
+            continue
+        ace_atoms.add(node)
+        for nb in adj[node]:
+            if nb not in ace_atoms and nb != backbone_n_id:
+                queue.append(nb)
+
+    backbone_ca_id = next(
+        (nb for nb in adj[backbone_n_id] if nb not in ace_atoms and atoms[nb]["type"].lower() == "c3"),
+        None,
+    )
+    if backbone_ca_id is None:
+        raise ValueError(f"Could not identify backbone CA in {mol2_path}.")
+
+    backbone_c_id = None
+    backbone_o_id = None
+    for nb in adj[backbone_ca_id]:
+        if nb == backbone_n_id or nb in ace_atoms:
+            continue
+        if atoms[nb]["type"].lower() in _GAFF_C_TYPES and atoms[nb]["type"].lower() != "c3":
+            o_neighbors = [x for x in adj[nb] if atoms[x]["type"].lower() == "o" and x != backbone_ca_id]
+            if o_neighbors:
+                backbone_c_id = nb
+                backbone_o_id = o_neighbors[0]
+                break
+    if backbone_c_id is None:
+        raise ValueError(f"Could not identify backbone C in {mol2_path}.")
+
+    nme_cap_n_id = next(
+        (nb for nb in adj[backbone_c_id]
+         if nb != backbone_ca_id and nb != backbone_o_id and atoms[nb]["type"].lower() in _GAFF_N_TYPES),
+        None,
+    )
+    nme_atoms: set[int] = set()
+    if nme_cap_n_id is not None:
+        queue = [nme_cap_n_id]
+        while queue:
+            node = queue.pop()
+            if node in nme_atoms or node == backbone_c_id:
+                continue
+            nme_atoms.add(node)
+            for nb in adj[node]:
+                if nb not in nme_atoms and nb != backbone_c_id:
+                    queue.append(nb)
+
+    cap_atoms = ace_atoms | nme_atoms
+    core_ids = [aid for aid in sorted(atoms) if aid not in cap_atoms]
+
+    backbone_ha_id = next(
+        (nb for nb in adj[backbone_ca_id]
+         if atoms[nb]["type"].lower() == "h1" and nb not in cap_atoms),
+        None,
+    )
+    backbone_h_id = next(
+        (nb for nb in adj[backbone_n_id]
+         if atoms[nb]["type"].lower() in {"hn", "h"} and nb not in cap_atoms),
+        None,
+    )
+    backbone_cb_id = next(
+        (nb for nb in adj[backbone_ca_id]
+         if nb != backbone_n_id and nb != backbone_c_id and nb not in cap_atoms
+         and atoms[nb]["type"].lower() == "c3" and nb != backbone_ha_id),
+        None,
+    )
+    backbone_hb_ids: list[int] = []
+    if backbone_cb_id is not None:
+        backbone_hb_ids = [
+            nb for nb in adj[backbone_cb_id]
+            if atoms[nb]["type"].lower() in {"h1", "hc", "hx"} and nb not in cap_atoms
+        ]
+
+    rename: dict[int, tuple[str, str]] = {}
+    rename[backbone_n_id] = ("N", _AMBER_BACKBONE_TYPE["backbone_N"])
+    if backbone_h_id:
+        rename[backbone_h_id] = ("H", _AMBER_BACKBONE_TYPE["backbone_H"])
+    rename[backbone_ca_id] = ("CA", _AMBER_BACKBONE_TYPE["backbone_CA"])
+    if backbone_ha_id:
+        rename[backbone_ha_id] = ("HA", _AMBER_BACKBONE_TYPE["backbone_HA"])
+    rename[backbone_c_id] = ("C", _AMBER_BACKBONE_TYPE["backbone_C"])
+    rename[backbone_o_id] = ("O", _AMBER_BACKBONE_TYPE["backbone_O"])
+    if backbone_cb_id:
+        rename[backbone_cb_id] = ("CB", _AMBER_BACKBONE_TYPE["backbone_CB"])
+    for i, hb_id in enumerate(backbone_hb_ids, start=2):
+        rename[hb_id] = (f"HB{i}", _AMBER_BACKBONE_TYPE["backbone_HB"])
+
+    mol_name = sections.get("MOLECULE", ["UNK"])[0].strip() if sections.get("MOLECULE") else "UNK"
+    resname = mol_name.strip()
+    pdb_names_by_depth: dict[tuple[str, int], list[str]] = {}
+    if protein_pdb is not None:
+        with contextlib.suppress(Exception):
+            pdb_names_by_depth = _pdb_sidechain_names_by_depth(protein_pdb, resname)
+
+    if pdb_names_by_depth:
+        mol2_depth: dict[int, int] = {backbone_ca_id: 0}
+        bfs_queue = [backbone_ca_id]
+        while bfs_queue:
+            node = bfs_queue.pop(0)
+            for nb in adj[node]:
+                if nb not in mol2_depth and nb not in cap_atoms:
+                    mol2_depth[nb] = mol2_depth[node] + 1
+                    bfs_queue.append(nb)
+
+        sc_atoms_by_elem_depth: dict[tuple[str, int], list[int]] = {}
+        already_named = set(rename)
+        for aid in core_ids:
+            if aid in already_named:
+                continue
+            atom = atoms[aid]
+            gaff_type = atom["type"].lower()
+            if gaff_type.startswith("s"):
+                elem = "S"
+            elif gaff_type.startswith("o"):
+                elem = "O"
+            elif gaff_type.startswith("n"):
+                elem = "N"
+            elif gaff_type.startswith("p"):
+                elem = "P"
+            elif gaff_type.startswith("h"):
+                elem = "H"
+            elif gaff_type.startswith("c"):
+                elem = "C"
+            elif gaff_type.startswith("f"):
+                elem = "F"
+            elif gaff_type.startswith("cl"):
+                elem = "Cl"
+            elif gaff_type.startswith("br"):
+                elem = "Br"
+            else:
+                elem = gaff_type[0].upper()
+            depth_from_ca = mol2_depth.get(aid, 99)
+            sc_atoms_by_elem_depth.setdefault((elem, depth_from_ca), []).append(aid)
+
+        pdb_names_used: set[str] = set()
+        for (elem, depth), mol2_aids in sorted(sc_atoms_by_elem_depth.items()):
+            pdb_candidates = pdb_names_by_depth.get((elem, depth), [])
+            available = [n for n in pdb_candidates if n not in pdb_names_used]
+            for mol2_aid, pdb_name in zip(mol2_aids, available):
+                rename[mol2_aid] = (pdb_name, atoms[mol2_aid]["type"])
+                pdb_names_used.add(pdb_name)
+
+    n_atoms = len(core_ids)
+    core_bond_set = [
+        (a1, a2, bt) for a1, a2, bt in bonds if a1 not in cap_atoms and a2 not in cap_atoms
+    ]
+    n_bonds = len(core_bond_set)
+    new_id: dict[int, int] = {old: i + 1 for i, old in enumerate(core_ids)}
+
+    lines = [
+        "@<TRIPOS>MOLECULE",
+        mol_name,
+        f"   {n_atoms}    {n_bonds}     1     0     0",
+        "SMALL",
+        "RESP Charge",
+        "",
+        "",
+        "@<TRIPOS>ATOM",
+    ]
+    for old_id in core_ids:
+        atom = atoms[old_id]
+        nid = new_id[old_id]
+        name, atype = rename.get(old_id, (atom["name"], atom["type"]))
+        lines.append(
+            f"      {nid} {name:<10s} {atom['x']} {atom['y']} {atom['z']} "
+            f"{atype:<8s} {atom['subst_id']}  {atom['subst_name']:<8s} {atom['charge']}"
+        )
+
+    lines.append("@<TRIPOS>BOND")
+    for bid, (a1, a2, bt) in enumerate(core_bond_set, start=1):
+        lines.append(f"     {bid}    {new_id[a1]}    {new_id[a2]} {bt}")
+
+    subst_lines = sections.get("SUBSTRUCTURE", [])
+    if subst_lines:
+        lines.append("@<TRIPOS>SUBSTRUCTURE")
+        lines.extend(subst_lines)
+
+    output_mol2.write_text("\n".join(lines) + "\n")
+    return output_mol2
+
+
+# ---------------------------------------------------------------------------
+# tleap/antechamber helpers (used when extra_ff has mol2/frcmod files)
+# ---------------------------------------------------------------------------
+
+
+def _write_dry_protein_pdb(protein_pdb: Path, output_pdb: Path) -> Path:
+    """Write a PDB for tleap: strip water and H, adapt heavy-atom names to AMBER.
+
+    Uses line-based filtering to preserve original PDB residue numbers — critical
+    for MCPB.py workflows where tleap bond commands reference specific residue IDs.
+    Renames heavy atoms that differ between standard PDB/GROMACS convention and
+    AMBER ff14SB (OC1→O, OC2→OXT, ILE CD→CD1). H atoms are stripped so tleap
+    re-adds them with correct ff14SB names.
+    """
+    _AMBER_RENAMES: dict[tuple[str, str], str] = {
+        ("OC1", ""): "O",
+        ("OC2", ""): "OXT",
+        ("CD", "ILE"): "CD1",
+    }
+
+    def _rename_atom_in_line(line: str) -> str:
+        atom_name = line[12:16].strip()
+        resname = line[17:20].strip().upper()
+        # element column (cols 77-78, 1-indexed) gives definitive H detection.
+        element = line[76:78].strip().upper() if len(line) > 76 else ""
+        if element == "H" or (not element and atom_name and atom_name[0] == "H"):
+            return ""  # strip hydrogen
+        new_name = (
+            _AMBER_RENAMES.get((atom_name, resname))
+            or _AMBER_RENAMES.get((atom_name, ""))
+        )
+        if new_name is None:
+            return line
+        # Rewrite cols 13-16 (atom name field, 1-indexed) preserving all others.
+        n = len(new_name)
+        if n >= 4:
+            padded = new_name[:4]
+        elif n == 3:
+            padded = " " + new_name
+        elif n == 2:
+            padded = " " + new_name + " "
+        else:
+            padded = " " + new_name + "  "
+        return line[:12] + padded + line[16:]
+
+    lines_out: list[str] = []
+    last_written_rec: str | None = None
+    for raw_line in protein_pdb.read_text(encoding="utf-8", errors="replace").splitlines():
+        rec = raw_line[:6].strip().upper()
+        if rec not in ("ATOM", "HETATM"):
+            if rec == "END":
+                lines_out.append(raw_line)
+            continue
+        resname = raw_line[17:20].strip().upper()
+        if resname in _WATER_RESIDUE_NAMES_SET:
+            continue
+        new_line = _rename_atom_in_line(raw_line)
+        if not new_line:
+            continue
+        # Insert TER between the protein ATOM chain and any HETATM residues
+        # (e.g. MCPB.py ZN1).  Without TER, tleap does not recognise the last
+        # ATOM residue as C-terminal → CLYS/CXXX template not applied → OXT
+        # atom has no type → saveAmberParm fails.
+        if rec == "HETATM" and last_written_rec == "ATOM":
+            lines_out.append("TER")
+        lines_out.append(new_line)
+        last_written_rec = rec
+
+    output_pdb.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
+    return output_pdb
+
+
+def _compute_net_charge_from_sdf(sdf_path: Path) -> int:
+    """Return the total formal charge of the first molecule in an SDF file."""
+    try:
+        from rdkit import Chem  # noqa: PLC0415
+        supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False)
+        mol = next((m for m in supplier if m is not None), None)
+        if mol is None:
+            return 0
+        return sum(atom.GetFormalCharge() for atom in mol.GetAtoms())
+    except Exception:
+        return 0
+
+
+def _run_antechamber(sdf_path: Path, work_dir: Path, net_charge: int | None) -> tuple[Path, Path]:
+    """Run antechamber + parmchk2 on a ligand SDF; return (mol2, frcmod) paths."""
+    if net_charge is None:
+        net_charge = _compute_net_charge_from_sdf(sdf_path)
+
+    mol2_out = work_dir / "antechamber.mol2"
+    frcmod_out = work_dir / "antechamber.frcmod"
+
+    ante_result = subprocess.run(
+        [
+            "antechamber",
+            "-i", str(sdf_path.resolve()), "-fi", "sdf",
+            "-o", str(mol2_out), "-fo", "mol2",
+            "-c", "bcc", "-s", "2", "-nc", str(net_charge),
+            "-at", "gaff2",
+        ],
+        capture_output=True,
+        cwd=str(work_dir),
+    )
+    if ante_result.returncode != 0 or not mol2_out.exists():
+        raise RuntimeError(
+            f"antechamber failed for {sdf_path.name}:\n"
+            f"{ante_result.stderr.decode()}\n{ante_result.stdout.decode()}"
+        )
+
+    parmchk_result = subprocess.run(
+        ["parmchk2", "-s", "2", "-i", str(mol2_out), "-f", "mol2", "-o", str(frcmod_out)],
+        capture_output=True,
+        cwd=str(work_dir),
+    )
+    if parmchk_result.returncode != 0 or not frcmod_out.exists():
+        raise RuntimeError(
+            f"parmchk2 failed for {sdf_path.name}:\n"
+            f"{parmchk_result.stderr.decode()}"
+        )
+
+    return mol2_out, frcmod_out
+
+
+def _write_tleap_script(
+    protein_pdb: Path,
+    protein_mol2s: list[Path],
+    protein_frcmods: list[Path],
+    ligand_mol2: Path,
+    ligand_frcmod: Path,
+    cofactor_mol2s: list[Path],
+    cofactor_frcmods: list[Path],
+    output_prefix: Path,
+    add_atom_types_block: str | None = None,
+    bond_commands: list[str] | None = None,
+    extra_frcmod_names: list[str] | None = None,
+    leaprc_extra_sources: tuple[str, ...] | list[str] | None = None,
+) -> Path:
+    """Write a tleap script that combines protein + ligand + cofactors.
+
+    ``add_atom_types_block``, ``bond_commands``, and ``extra_frcmod_names`` are
+    populated from an MCPB.py-generated tleap.in when a metal site is present.
+    They are otherwise empty and the script degenerates to the standard path.
+    The addAtomTypes block must appear before mol2 templates are loaded so that
+    custom atom-type symbols (M1, Y1-Yn for any metal / any geometry) are
+    recognised when the mol2 files are parsed.  Bond commands are appended after
+    combine so that residue numbers still refer to the original PDB numbering.
+    ``leaprc_extra_sources`` adds additional leaprc sources (e.g.
+    leaprc.phosaa14SB for PTR/SEP/TPO) after the main protein and ligand FFs.
+    """
+    bond_commands = bond_commands or []
+    extra_frcmod_names = extra_frcmod_names or []
+    leaprc_extra_sources = leaprc_extra_sources or []
+
+    lines = [
+        "source leaprc.protein.ff14SB",
+        "source leaprc.gaff2",
+    ]
+
+    # Additional leaprc files (e.g. phosphorylated amino acids, custom residues).
+    for leaprc in leaprc_extra_sources:
+        lines.append(f"source {leaprc}")
+
+    # MCPB.py custom atom types (must come before loadMol2 calls).
+    if add_atom_types_block:
+        lines.append(add_atom_types_block)
+
+    # Standard AMBER frcmods (e.g. frcmod.ions1lm_126_tip3p) from MCPB.py script.
+    for fname in extra_frcmod_names:
+        lines.append(f"loadAmberParams {fname}")
+
+    # Non-standard protein residue parameters (frcmod then mol2 templates).
+    for frcmod in protein_frcmods:
+        lines.append(f"loadAmberParams {frcmod.resolve()}")
+    for mol2 in protein_mol2s:
+        resname = mol2.stem.replace("_stripped", "").upper()
+        lines.append(f"{resname} = loadMol2 {mol2.resolve()}")
+
+    # Ligand parameters and coordinates (antechamber mol2 carries docked pose).
+    lines.append(f"loadAmberParams {ligand_frcmod.resolve()}")
+    lines.append(f"mol_lig = loadMol2 {ligand_mol2.resolve()}")
+
+    # Cofactor parameters.
+    for i, (cof_mol2, cof_frcmod) in enumerate(zip(cofactor_mol2s, cofactor_frcmods)):
+        lines.append(f"loadAmberParams {cof_frcmod.resolve()}")
+        lines.append(f"mol_cof{i} = loadMol2 {cof_mol2.resolve()}")
+
+    # Load protein directly from PDB (handles HETATM non-standard residues and
+    # MCPB.py-renamed residues like CS1-4 / ZN1).
+    lines.append(f"mol_prot = loadPdb {protein_pdb.resolve()}")
+
+    # Metal-coordination and backbone-reconnection bond commands from MCPB.py.
+    # Must be applied to mol_prot BEFORE combine: tleap preserves PDB residue
+    # numbers on a loadPdb unit but renumbers sequentially after combine, so
+    # bond commands like "bond mol.400.ZN" fail post-combine when the protein
+    # has fewer than 400 sequential residues.
+    for bond_cmd in bond_commands:
+        lines.append(bond_cmd.replace("mol.", "mol_prot."))
+
+    # Combine protein + ligand + cofactors.
+    parts = "mol_prot mol_lig"
+    for i in range(len(cofactor_mol2s)):
+        parts += f" mol_cof{i}"
+    lines.append(f"mol = combine {{{parts}}}")
+
+    lines.extend([
+        f"saveAmberParm mol {output_prefix}.prmtop {output_prefix}.inpcrd",
+        "quit",
+    ])
+
+    script_path = output_prefix.parent / "tleap.in"
+    script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return script_path
+
+
+def _run_tleap(script_path: Path, work_dir: Path) -> None:
+    """Run tleap and raise RuntimeError on failure."""
+    result = subprocess.run(
+        ["tleap", "-f", str(script_path)],
+        capture_output=True,
+        cwd=str(work_dir),
+    )
+    output = (result.stdout + result.stderr).decode()
+    if result.returncode != 0:
+        raise RuntimeError(f"tleap failed (exit {result.returncode}):\n{output}")
+    if "FATAL" in output.upper():
+        raise RuntimeError(f"tleap reported FATAL error:\n{output}")
+    logger.debug("tleap completed successfully.")
+    if "Warning" in output or "error" in output.lower():
+        logger.debug("tleap warnings/non-fatal messages:\n%s", output)
+
+
+def _parse_mcpb_tleap_in(tleap_in: Path) -> dict:
+    """Parse an MCPB.py-generated tleap.in and extract elements for our combined script.
+
+    MCPB.py step 4 generates a complete tleap script for any metal / any geometry.
+    This parser extracts the portable parts (addAtomTypes block, bond commands,
+    protein PDB path, and standard ion frcmod names) without hardcoding residue
+    names, atom types, coordination numbers, or metal identity.  Works for
+    3-8-coordinate sites with any transition metal.
+    """
+    tleap_dir = tleap_in.parent
+    add_atom_types_lines: list[str] = []
+    bond_commands: list[str] = []
+    protein_pdb: Path | None = None
+    extra_frcmod_names: list[str] = []
+
+    in_add_atom_types = False
+
+    for line in tleap_in.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        low = stripped.lower()
+
+        if low.startswith("addatomtypes"):
+            in_add_atom_types = True
+            add_atom_types_lines.append(stripped)
+            continue
+
+        if in_add_atom_types:
+            add_atom_types_lines.append(stripped)
+            if "}" in stripped and "{" not in stripped:
+                in_add_atom_types = False
+            continue
+
+        # mol = loadPdb X  (the MCPB.py-renamed protein PDB, no ligand)
+        if re.match(r"mol\s*=\s*loadpdb\s+", low):
+            pdb_name = re.split(r"loadpdb\s+", stripped, flags=re.IGNORECASE, maxsplit=1)[-1].strip()
+            candidate = (tleap_dir / pdb_name).resolve()
+            if candidate.exists():
+                protein_pdb = candidate
+            continue
+
+        # bond commands — generic for any coordination geometry
+        if low.startswith("bond "):
+            bond_commands.append(stripped)
+            continue
+
+        # Standard AMBER frcmod files (no leading "/" = resolved from $AMBERHOME)
+        if low.startswith("loadamberparams "):
+            frcmod_name = stripped.split(None, 1)[1].strip()
+            if not frcmod_name.startswith("/") and not (tleap_dir / frcmod_name).exists():
+                extra_frcmod_names.append(frcmod_name)
+            continue
+
+    return {
+        "add_atom_types_block": "\n".join(add_atom_types_lines) if add_atom_types_lines else None,
+        "bond_commands": bond_commands,
+        "protein_pdb": protein_pdb,
+        "extra_frcmod_names": extra_frcmod_names,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +669,8 @@ class ParametrizationConfig(BaseModel):
     ligand_ff: LigandFF = LigandFF.GAFF2
     charge_method: ChargeMethod = ChargeMethod.AM1BCC
     extra_ff_files: tuple[Path, ...] = ()
+    mcpb_tleap_in: Path | None = None
+    leaprc_extra_sources: tuple[str, ...] = ()
 
     @field_validator("extra_ff_files", mode="before")
     @classmethod
@@ -63,6 +680,16 @@ class ParametrizationConfig(BaseModel):
         if missing:
             raise ValueError("Extra force field files not found: " + ", ".join(str(p) for p in missing))
         return result
+
+    @field_validator("mcpb_tleap_in", mode="before")
+    @classmethod
+    def _check_mcpb_tleap_in(cls, v: Any) -> Path | None:
+        if v is None:
+            return None
+        p = Path(v)
+        if not p.exists():
+            raise ValueError(f"MCPB.py tleap.in not found: {p}")
+        return p
 
     # ------------------------------------------------------------------
     # Named presets
@@ -190,13 +817,16 @@ class ParametrisedComplex:
 
 
 def parametrize(inp: ParametrizationInput) -> ParametrisedComplex:
-    """Parametrize a protein-ligand complex without running tleap.
+    """Parametrize a protein-ligand complex.
 
-    Uses OpenMM force field XML files for the protein and
-    ``GAFFTemplateGenerator`` for the ligand. Partial charges are assigned
-    via the method specified in ``inp.config.charge_method`` (default:
-    AM1-BCC via sqm). The system is exported to GROMACS ``.gro`` and
-    ``.top`` files via ParmEd.
+    Routes to the tleap path when the extra_ff_files include mol2 or frcmod
+    files (non-standard residues like CSD, metal-coordinating cysteines from
+    MCPB.py, etc.). The tleap path calls antechamber for the ligand and uses
+    tleap directly for the combined protein+ligand system so that HETATM
+    non-standard residues are handled natively without OpenMM template matching.
+
+    For XML-only extra_ff (e.g. phosaa14SB.xml for PTR), the OpenMM path is
+    used unchanged.
 
     Parameters
     ----------
@@ -210,7 +840,193 @@ def parametrize(inp: ParametrizationInput) -> ParametrisedComplex:
         Frozen dataclass holding the paths to the output GROMACS files and
         the configuration used.
     """
+    has_frcmod_mol2 = any(
+        p.suffix.lower() in {".frcmod", ".mol2"} for p in inp.config.extra_ff_files
+    )
+    if has_frcmod_mol2 or inp.config.leaprc_extra_sources or inp.config.mcpb_tleap_in is not None:
+        return _parametrize_tleap(inp)
     return _parametrize_openmm(inp)
+
+
+# ---------------------------------------------------------------------------
+# tleap / antechamber implementation
+# ---------------------------------------------------------------------------
+
+
+def _remap_bond_residue_numbers(
+    bond_commands: list[str], hetatm_resnum_map: dict[int, int]
+) -> list[str]:
+    """Remap PDB HETATM residue numbers in bond commands to tleap sequential positions.
+
+    Modern tleap (teLeap) assigns HETATM residues that follow a gap in the PDB
+    residue numbering a sequential position immediately after the last ATOM
+    residue, not the actual PDB residue number.  E.g. a ZN at PDB residue 400
+    in a protein whose last ATOM residue is 191 gets tleap index 192.
+
+    hetatm_resnum_map: {pdb_resnum: tleap_seq_num} for all HETATM residues.
+    """
+    if not hetatm_resnum_map:
+        return bond_commands
+
+    def _repl(m: re.Match) -> str:
+        n = int(m.group(1))
+        return f".{hetatm_resnum_map.get(n, n)}."
+
+    return [re.sub(r"\.(\d+)\.", _repl, cmd) for cmd in bond_commands]
+
+
+def _parametrize_tleap(inp: ParametrizationInput) -> ParametrisedComplex:
+    """Parametrize using tleap for the protein and antechamber for the ligand.
+
+    Proteins with non-standard residues supplied as mol2+frcmod files (e.g.
+    MCPB.py metal sites, RESP-charge non-standard amino acids) cannot be
+    reliably handled by OpenMM template matching when those residues appear as
+    HETATM records in the PDB. tleap reads the original PDB directly and
+    resolves residue templates by name, so HETATM non-standard residues are
+    parametrized correctly as long as a matching mol2 template is loaded first.
+    """
+    work_dir = inp.work_dir or Path(tempfile.mkdtemp(prefix="gbsa_param_"))
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    all_frcmod_files = [p for p in inp.config.extra_ff_files if p.suffix.lower() == ".frcmod"]
+    all_mol2_files = [p for p in inp.config.extra_ff_files if p.suffix.lower() == ".mol2"]
+    # XML files (e.g. phosaa14SB.xml) are OpenMM-only; tleap uses leaprc instead.
+
+    # When a cofactor SDF has a same-stem mol2+frcmod in extra_ff_files, those
+    # pre-computed parameters are used directly (antechamber is skipped for that
+    # cofactor). Files not matching any cofactor stem are treated as protein residue
+    # templates and passed to _write_tleap_script as protein_mol2s/protein_frcmods.
+    _cof_stems = {cof_sdf.stem for cof_sdf in inp.cofactor_sdfs}
+    precomp_mol2 = {p.stem: p for p in all_mol2_files if p.stem in _cof_stems}
+    precomp_frcmod = {p.stem: p for p in all_frcmod_files if p.stem in _cof_stems}
+    frcmod_files = [p for p in all_frcmod_files if p.stem not in _cof_stems]
+    mol2_files = [p for p in all_mol2_files if p.stem not in _cof_stems]
+
+    # MCPB.py path: use the MCPB.py-renamed PDB (with metal residues and
+    # metal ion already in place) instead of the original protein PDB.
+    # The tleap.in provides the addAtomTypes block (generic for any metal /
+    # any geometry) and all bond commands (coordination + backbone reconnection).
+    if inp.config.mcpb_tleap_in is not None:
+        mcpb_info = _parse_mcpb_tleap_in(inp.config.mcpb_tleap_in)
+        source_pdb = mcpb_info["protein_pdb"]
+        if source_pdb is None:
+            raise RuntimeError(
+                f"Could not locate loadpdb line in MCPB.py tleap.in: {inp.config.mcpb_tleap_in}"
+            )
+        add_atom_types_block: str | None = mcpb_info["add_atom_types_block"]
+        bond_commands: list[str] = mcpb_info["bond_commands"]
+        extra_frcmod_names: list[str] = mcpb_info["extra_frcmod_names"]
+    else:
+        source_pdb = inp.protein_pdb
+        add_atom_types_block = None
+        bond_commands = []
+        extra_frcmod_names = []
+
+    # Crystal waters: save for solvate_bss to restore, strip from protein PDB.
+    crystal_waters_pdb = _write_crystal_waters_pdb(source_pdb, work_dir / "crystal_waters.pdb")
+    dry_pdb = _write_dry_protein_pdb(source_pdb, work_dir / "protein_dry.pdb")
+
+    # Modern tleap (teLeap) assigns HETATM residues that appear after a gap in
+    # the PDB residue numbering a sequential position immediately after the last
+    # ATOM residue (e.g. ZN at PDB 400 → tleap index 192 when last ATOM is 191).
+    # Remap any such residue numbers in the MCPB.py bond commands.
+    if bond_commands:
+        _atom_resnums: set[int] = set()
+        _hetatm_resnums: set[int] = set()
+        for _line in dry_pdb.read_text().splitlines():
+            _rec = _line[:6].strip().upper()
+            try:
+                _rn = int(_line[22:26])
+            except (ValueError, IndexError):
+                continue
+            if _rec == "ATOM":
+                _atom_resnums.add(_rn)
+            elif _rec == "HETATM":
+                _hetatm_resnums.add(_rn)
+        _hetatm_map: dict[int, int] = {}
+        if _atom_resnums and _hetatm_resnums:
+            _max_atom = max(_atom_resnums)
+            for _i, _pdb_rn in enumerate(sorted(_hetatm_resnums)):
+                _hetatm_map[_pdb_rn] = _max_atom + 1 + _i
+        bond_commands = _remap_bond_residue_numbers(bond_commands, _hetatm_map)
+
+    # Strip ACE/NME caps from mol2 files prepared as capped dipeptides.
+    # MCPB.py mol2s (CS1-4, ZN1) are already stripped residue templates;
+    # _strip_mol2_dipeptide_caps raises ValueError for them, so we fall back
+    # to the original mol2 unchanged — which is correct for tleap.
+    stripped_mol2s: list[Path] = []
+    for mol2 in mol2_files:
+        stripped = work_dir / f"{mol2.stem}_stripped.mol2"
+        try:
+            _strip_mol2_dipeptide_caps(mol2, stripped, protein_pdb=source_pdb)
+            stripped_mol2s.append(stripped)
+        except Exception as exc:
+            warnings.warn(f"Cap stripping skipped for {mol2.name}: {exc}", stacklevel=2)
+            stripped_mol2s.append(mol2)
+
+    # Parametrize ligand with antechamber + parmchk2 (GAFF2 + AM1-BCC).
+    lig_work = work_dir / "ligand"
+    lig_work.mkdir(exist_ok=True)
+    lig_mol2, lig_frcmod = _run_antechamber(inp.ligand_sdf, lig_work, inp.net_charge)
+
+    # Parametrize cofactors (use pre-computed mol2+frcmod from extra_ff_files when
+    # both files are present for a given cofactor stem; fall back to antechamber).
+    cof_mol2s: list[Path] = []
+    cof_frcmods: list[Path] = []
+    for i, cof_sdf in enumerate(inp.cofactor_sdfs):
+        pm2 = precomp_mol2.get(cof_sdf.stem)
+        pfc = precomp_frcmod.get(cof_sdf.stem)
+        if pm2 is not None and pfc is not None:
+            cof_mol2s.append(pm2)
+            cof_frcmods.append(pfc)
+        else:
+            cof_work = work_dir / f"cofactor_{i}"
+            cof_work.mkdir(exist_ok=True)
+            c_mol2, c_frcmod = _run_antechamber(cof_sdf, cof_work, net_charge=None)
+            cof_mol2s.append(c_mol2)
+            cof_frcmods.append(c_frcmod)
+
+    # Write and run tleap to get combined AMBER topology + coordinates.
+    script = _write_tleap_script(
+        protein_pdb=dry_pdb,
+        protein_mol2s=stripped_mol2s,
+        protein_frcmods=frcmod_files,
+        ligand_mol2=lig_mol2,
+        ligand_frcmod=lig_frcmod,
+        cofactor_mol2s=cof_mol2s,
+        cofactor_frcmods=cof_frcmods,
+        output_prefix=work_dir / "complex",
+        add_atom_types_block=add_atom_types_block,
+        bond_commands=bond_commands,
+        extra_frcmod_names=extra_frcmod_names,
+        leaprc_extra_sources=list(inp.config.leaprc_extra_sources),
+    )
+    _run_tleap(script, work_dir=work_dir)
+
+    # Convert AMBER prmtop/inpcrd → GROMACS GRO/TOP with ParmEd.
+    prmtop = work_dir / "complex.prmtop"
+    inpcrd = work_dir / "complex.inpcrd"
+    if not prmtop.exists() or not inpcrd.exists():
+        raise RuntimeError(
+            f"tleap did not produce expected output files in {work_dir}. "
+            "Check tleap.in and the tleap output."
+        )
+    struct = pmd.load_file(str(prmtop), str(inpcrd))
+    gro_file = work_dir / "complex.gro"
+    top_file = work_dir / "complex.top"
+    gro_file.unlink(missing_ok=True)
+    top_file.unlink(missing_ok=True)
+    struct.save(str(top_file), format="gromacs")
+    struct.save(str(gro_file))
+
+    return ParametrisedComplex(
+        gro_file=gro_file,
+        top_file=top_file,
+        config=inp.config,
+        forcefield=None,
+        parmed_structure=struct,
+        crystal_waters_pdb=crystal_waters_pdb,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +1105,28 @@ def _write_crystal_waters_pdb(protein_pdb: Path, output_pdb: Path) -> Path | Non
     return output_pdb
 
 
+def _assign_nagl_charges_direct(mol: "Molecule") -> None:  # noqa: F821
+    """Assign AM1-BCC charges via the openff-nagl GNNModel API, bypassing the toolkit wrapper.
+
+    The OpenFF toolkit's NAGL toolkit wrapper may not register in all environments
+    (e.g. SLURM compute nodes). This function loads the model directly and writes
+    charges back to the molecule, normalised to the molecular formal charge sum.
+    """
+    import numpy as np  # noqa: PLC0415
+    import openff.nagl as _nagl  # noqa: PLC0415
+    import openff.nagl_models as _nm  # noqa: PLC0415
+    from openff.units import unit as _unit  # noqa: PLC0415
+
+    model_path = str(_nm.get_model("openff-gnn-am1bcc-1.0.0.pt"))
+    model = _nagl.GNNModel.load(model_path, eval_mode=True)
+    charges_dict = model.compute_properties(mol)
+    charges = charges_dict["am1bcc_charges"].astype(float)
+    formal_sum = float(sum(a.formal_charge.m for a in mol.atoms))
+    charges -= (float(np.sum(charges)) - formal_sum) / len(charges)
+    mol.partial_charges = _unit.Quantity(charges, _unit.elementary_charge)
+
+
+
 def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     work_dir = inp.work_dir or Path(tempfile.mkdtemp(prefix="gbsa_param_"))
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -312,7 +1150,7 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
 
     # --- Ligand --------------------------------------------------------
     logger.debug("Loading ligand SDF: %s …", inp.ligand_sdf)
-    ligand = Molecule.from_file(str(inp.ligand_sdf))
+    ligand = Molecule.from_file(str(inp.ligand_sdf), allow_undefined_stereo=True)
     if not ligand.conformers:
         raise ValueError(
             f"Ligand SDF '{inp.ligand_sdf}' contains no 3-D conformers. "
@@ -339,7 +1177,7 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     cofactors: list[Molecule] = []
     for cof_path in inp.cofactor_sdfs:
         logger.debug("Loading cofactor SDF: %s …", cof_path)
-        cof = Molecule.from_file(str(cof_path))
+        cof = Molecule.from_file(str(cof_path), allow_undefined_stereo=True)
         if not cof.conformers:
             raise ValueError(
                 f"Cofactor SDF '{cof_path}' contains no 3-D conformers. "
@@ -351,11 +1189,20 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
             len(cof.conformers),
         )
         logger.debug("Assigning partial charges to cofactor (method=%s) …", inp.config.charge_method.value)
-        cof.assign_partial_charges(
-            partial_charge_method=inp.config.charge_method.value,
-            normalize_partial_charges=True,
-            use_conformers=cof.conformers,
-        )
+        try:
+            cof.assign_partial_charges(
+                partial_charge_method=inp.config.charge_method.value,
+                normalize_partial_charges=True,
+                use_conformers=cof.conformers,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Cofactor charge assignment failed with %s (%s); falling back to NAGL direct API.",
+                inp.config.charge_method.value,
+                exc,
+            )
+            _assign_nagl_charges_direct(cof)
+            logger.info("Cofactor charges assigned via NAGL fallback.")
         cofactors.append(cof)
     if cofactors:
         logger.debug("Loaded and parametrized %d cofactor(s).", len(cofactors))
@@ -404,6 +1251,8 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
 
     gro_file = work_dir / "complex.gro"
     top_file = work_dir / "complex.top"
+    gro_file.unlink(missing_ok=True)
+    top_file.unlink(missing_ok=True)
     logger.debug("Writing GROMACS topology → %s …", top_file)
     structure.save(str(top_file), format="gromacs")
     logger.debug("Writing GROMACS coordinates → %s …", gro_file)
