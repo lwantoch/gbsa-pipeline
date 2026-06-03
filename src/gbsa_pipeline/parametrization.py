@@ -158,7 +158,171 @@ def _pdb_sidechain_names_by_depth(protein_pdb: Path, resname: str) -> dict[tuple
     return result
 
 
+def _gaff_type_to_element(gaff_type: str) -> str:
+    """Map a GAFF atom type string to its element symbol."""
+    t = gaff_type.lower()
+    if t.startswith("cl"):
+        return "Cl"
+    if t.startswith("br"):
+        return "Br"
+    if t.startswith("s"):
+        return "S"
+    if t.startswith("o"):
+        return "O"
+    if t.startswith("n"):
+        return "N"
+    if t.startswith("p"):
+        return "P"
+    if t.startswith("h"):
+        return "H"
+    if t.startswith("c"):
+        return "C"
+    if t.startswith("f"):
+        return "F"
+    return t[0].upper()
+
+
+def _strip_mol2_dipeptide_caps_parmed(
+    mol2_path: Path,
+    output_mol2: Path,
+    protein_pdb: Path | None = None,
+) -> Path:
+    """ParmEd-based cap stripping: load mol2, rename backbone atoms, strip ACE/NME, save."""
+    import parmed as pmd
+
+    structure = pmd.load_file(str(mol2_path))
+
+    res_names = {r.name.upper() for r in structure.residues}
+    if "ACE" not in res_names:
+        raise ValueError(f"No ACE residue found by ParmEd in {mol2_path}")
+
+    cap_idx: set[int] = {a.idx for a in structure.atoms if a.residue.name.upper() in {"ACE", "NME"}}
+
+    adj_pmd: dict[int, list[pmd.Atom]] = {a.idx: [] for a in structure.atoms}
+    for bond in structure.bonds:
+        adj_pmd[bond.atom1.idx].append(bond.atom2)
+        adj_pmd[bond.atom2.idx].append(bond.atom1)
+
+    backbone_n = None
+    for atom in structure.atoms:
+        if atom.idx in cap_idx or atom.type.lower() not in _GAFF_N_TYPES:
+            continue
+        if any(nb.idx in cap_idx for nb in adj_pmd[atom.idx]):
+            backbone_n = atom
+            break
+    if backbone_n is None:
+        raise ValueError(f"Could not identify backbone N in {mol2_path}")
+
+    backbone_ca = next(
+        (nb for nb in adj_pmd[backbone_n.idx] if nb.idx not in cap_idx and nb.type.lower() == "c3"),
+        None,
+    )
+    if backbone_ca is None:
+        raise ValueError(f"Could not identify backbone CA in {mol2_path}")
+
+    backbone_c = backbone_o = None
+    for nb in adj_pmd[backbone_ca.idx]:
+        if nb is backbone_n or nb.idx in cap_idx:
+            continue
+        if nb.type.lower() in _GAFF_C_TYPES and nb.type.lower() != "c3":
+            o_nbs = [x for x in adj_pmd[nb.idx] if x.type.lower() == "o" and x is not backbone_ca]
+            if o_nbs:
+                backbone_c = nb
+                backbone_o = o_nbs[0]
+                break
+    if backbone_c is None or backbone_o is None:
+        raise ValueError(f"Could not identify backbone C/O in {mol2_path}")
+
+    backbone_ha = next(
+        (nb for nb in adj_pmd[backbone_ca.idx] if nb.type.lower() == "h1" and nb.idx not in cap_idx),
+        None,
+    )
+    backbone_h = next(
+        (nb for nb in adj_pmd[backbone_n.idx] if nb.type.lower() in {"hn", "h"} and nb.idx not in cap_idx),
+        None,
+    )
+    backbone_cb = next(
+        (
+            nb for nb in adj_pmd[backbone_ca.idx]
+            if nb is not backbone_n and nb is not backbone_c
+            and nb.idx not in cap_idx and nb.type.lower() == "c3"
+            and nb is not backbone_ha
+        ),
+        None,
+    )
+    backbone_hb_atoms: list[pmd.Atom] = []
+    if backbone_cb is not None:
+        backbone_hb_atoms = [
+            nb for nb in adj_pmd[backbone_cb.idx]
+            if nb.type.lower() in {"h1", "hc", "hx"} and nb.idx not in cap_idx
+        ]
+
+    backbone_n.name = "N";   backbone_n.type   = _AMBER_BACKBONE_TYPE["backbone_N"]
+    backbone_ca.name = "CA"; backbone_ca.type  = _AMBER_BACKBONE_TYPE["backbone_CA"]
+    backbone_c.name = "C";   backbone_c.type   = _AMBER_BACKBONE_TYPE["backbone_C"]
+    backbone_o.name = "O";   backbone_o.type   = _AMBER_BACKBONE_TYPE["backbone_O"]
+    if backbone_ha:
+        backbone_ha.name = "HA"; backbone_ha.type = _AMBER_BACKBONE_TYPE["backbone_HA"]
+    if backbone_h:
+        backbone_h.name = "H";  backbone_h.type  = _AMBER_BACKBONE_TYPE["backbone_H"]
+    if backbone_cb:
+        backbone_cb.name = "CB"; backbone_cb.type = _AMBER_BACKBONE_TYPE["backbone_CB"]
+    for i, hb in enumerate(backbone_hb_atoms, start=2):
+        hb.name = f"HB{i}"; hb.type = _AMBER_BACKBONE_TYPE["backbone_HB"]
+
+    resname = structure.residues[0].name.strip() if structure.residues else "UNK"
+    pdb_names_by_depth: dict[tuple[str, int], list[str]] = {}
+    if protein_pdb is not None:
+        with contextlib.suppress(Exception):
+            pdb_names_by_depth = _pdb_sidechain_names_by_depth(protein_pdb, resname)
+
+    if pdb_names_by_depth:
+        named_idx = {a.idx for a in [backbone_n, backbone_ca, backbone_c, backbone_o, backbone_ha, backbone_h, backbone_cb, *backbone_hb_atoms] if a is not None}
+        mol2_depth: dict[int, int] = {backbone_ca.idx: 0}
+        bfs_q = [backbone_ca]
+        while bfs_q:
+            node = bfs_q.pop(0)
+            for nb in adj_pmd[node.idx]:
+                if nb.idx not in mol2_depth and nb.idx not in cap_idx:
+                    mol2_depth[nb.idx] = mol2_depth[node.idx] + 1
+                    bfs_q.append(nb)
+
+        sc_by_elem_depth: dict[tuple[str, int], list[pmd.Atom]] = {}
+        for atom in structure.atoms:
+            if atom.idx in cap_idx or atom.idx in named_idx:
+                continue
+            elem = _gaff_type_to_element(atom.type)
+            sc_by_elem_depth.setdefault((elem, mol2_depth.get(atom.idx, 99)), []).append(atom)
+
+        pdb_names_used: set[str] = set()
+        for (elem, depth), sc_atoms in sorted(sc_by_elem_depth.items()):
+            available = [n for n in pdb_names_by_depth.get((elem, depth), []) if n not in pdb_names_used]
+            for atom, pdb_name in zip(sc_atoms, available):
+                atom.name = pdb_name
+                pdb_names_used.add(pdb_name)
+
+    structure.strip(":ACE,NME")
+    output_mol2.parent.mkdir(parents=True, exist_ok=True)
+    structure.save(str(output_mol2), format="mol2", overwrite=True)
+    return output_mol2
+
+
 def _strip_mol2_dipeptide_caps(
+    mol2_path: Path,
+    output_mol2: Path,
+    protein_pdb: Path | None = None,
+) -> Path:
+    """Strip ACE/NME caps from a capped-dipeptide mol2, trying ParmEd first.
+
+    Falls back to raw-text parsing when ParmEd cannot read the GAFF mol2 variant.
+    """
+    try:
+        return _strip_mol2_dipeptide_caps_parmed(mol2_path, output_mol2, protein_pdb)
+    except Exception:
+        return _strip_mol2_dipeptide_caps_text(mol2_path, output_mol2, protein_pdb)
+
+
+def _strip_mol2_dipeptide_caps_text(
     mol2_path: Path,
     output_mol2: Path,
     protein_pdb: Path | None = None,
@@ -352,27 +516,7 @@ def _strip_mol2_dipeptide_caps(
             if aid in already_named:
                 continue
             atom = atoms[aid]
-            gaff_type = atom["type"].lower()
-            if gaff_type.startswith("s"):
-                elem = "S"
-            elif gaff_type.startswith("o"):
-                elem = "O"
-            elif gaff_type.startswith("n"):
-                elem = "N"
-            elif gaff_type.startswith("p"):
-                elem = "P"
-            elif gaff_type.startswith("h"):
-                elem = "H"
-            elif gaff_type.startswith("c"):
-                elem = "C"
-            elif gaff_type.startswith("f"):
-                elem = "F"
-            elif gaff_type.startswith("cl"):
-                elem = "Cl"
-            elif gaff_type.startswith("br"):
-                elem = "Br"
-            else:
-                elem = gaff_type[0].upper()
+            elem = _gaff_type_to_element(atom["type"])
             depth_from_ca = mol2_depth.get(aid, 99)
             sc_atoms_by_elem_depth.setdefault((elem, depth_from_ca), []).append(aid)
 
