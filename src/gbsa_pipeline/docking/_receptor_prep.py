@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from pathlib import Path
 from subprocess import CompletedProcess, run
@@ -10,6 +11,20 @@ from subprocess import CompletedProcess, run
 from gbsa_pipeline.docking._utils import _require_file, _summarize_stderr, _write_process_log
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _strip_hetatm(receptor_pdb: Path, dest: Path) -> Path:
+    """Write a copy of receptor_pdb with HETATM records removed.
+
+    Meeko processes ATOM and HETATM identically, so modified residues stored
+    as HETATM (e.g. CSD, PTR) that share a residue number with a protein ATOM
+    residue cause ``each residue key must have exactly 1 resname`` errors.
+    Docking receptors should only contain protein atoms anyway.
+    """
+    lines = receptor_pdb.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept = [l for l in lines if not l.startswith("HETATM")]
+    dest.write_text("".join(kept), encoding="utf-8")
+    return dest
 
 
 def convert_receptor_pdb_to_pdbqt(
@@ -47,14 +62,21 @@ def convert_receptor_pdb_to_pdbqt(
     output_base = output_path.with_suffix("")
     log_path = output_path.with_suffix(".meeko_receptor.log")
 
-    cmd = [
-        mk_prepare_receptor_binary,
-        "--read_pdb",
-        str(receptor_pdb),
-        "-o",
-        str(output_base),
-        "-p",
-    ]
+    # Strip HETATM before Meeko so modified residues (CSD, PTR, …) stored as
+    # HETATM with the same residue number as a protein ATOM don't cause errors.
+    pdb_for_meeko = _strip_hetatm(receptor_pdb, output_path.parent / f"{receptor_pdb.stem}_protein_only.pdb")
+
+    def _run_meeko(extra_args: list[str] = []) -> CompletedProcess[str]:  # noqa: B006
+        _cmd = [
+            mk_prepare_receptor_binary,
+            "--read_pdb",
+            str(pdb_for_meeko),
+            "-o",
+            str(output_base),
+            "-p",
+            *extra_args,
+        ]
+        return run(_cmd, capture_output=True, text=True, check=False)  # noqa: S603
 
     LOGGER.info(
         "Preparing receptor with Meeko: %s -> %s",
@@ -62,12 +84,21 @@ def convert_receptor_pdb_to_pdbqt(
         output_path.name,
     )
 
-    process: CompletedProcess[str] = run(  # noqa: S603
-        cmd,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    process = _run_meeko()
+
+    # Cross-chain disulfide bonds cause "Expected N paddings … got 0". Retry
+    # with --set_template {chain}:{res}=CYX so Meeko uses the cystine template.
+    if process.returncode != 0 and "paddings" in process.stderr:
+        residues = re.findall(r"matched with excess inter-residue bond\(s\): (\S+)", process.stderr)
+        if residues:
+            template_arg = ",".join(f"{r}=CYX" for r in residues)
+            LOGGER.warning(
+                "Meeko: cross-chain CYS bonds detected (%s), retrying with --set_template %s",
+                ", ".join(residues), template_arg,
+            )
+            process = _run_meeko(["--set_template", template_arg])
+
+    cmd = [mk_prepare_receptor_binary, "--read_pdb", str(pdb_for_meeko), "-o", str(output_base), "-p"]
 
     _write_process_log(
         log_path,

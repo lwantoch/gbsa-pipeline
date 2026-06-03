@@ -35,8 +35,17 @@ _WATER_RESNAMES: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL
 
 
 def _read_pdb_like(path: Path) -> gemmi.Structure:
-    """Read a PDB or PDBQT file, forcing the PDB parser."""
-    return gemmi.read_structure(str(path), format=gemmi.CoorFormat.Pdb)
+    """Read a PDB or PDBQT file; only the first MODEL block is kept.
+
+    Vina writes all poses into one PDBQT (MODEL 1…N). Gemmi raises on
+    duplicate model numbers when the full file is parsed, so we truncate to
+    the first ENDMDL before handing off to the parser.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    endmdl = text.find("ENDMDL")
+    if endmdl != -1:
+        text = text[: endmdl + len("ENDMDL")] + "\nEND\n"
+    return gemmi.read_pdb_string(text)
 
 
 def _atom_pos(atom: Any) -> np.ndarray:
@@ -307,9 +316,17 @@ def dock_with_and_without_crystal_waters(
     receptor_with_waters = work_dir / "receptor_with_crystal_waters.pdb"
     prepare_receptor_with_crystal_waters(request.receptor, selected_path, receptor_with_waters)
 
-    result_with_water = engine.dock(
-        request.model_copy(update={"receptor": receptor_with_waters, "workdir": work_dir / "with_water"})
-    )
+    try:
+        result_with_water = engine.dock(
+            request.model_copy(update={"receptor": receptor_with_waters, "workdir": work_dir / "with_water"})
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "With-waters docking failed (%s: %s); falling back to no-water result.",
+            type(exc).__name__, exc,
+        )
+        return _no_water_manifest()
+
     score_with_water = _best_score(result_with_water)
     pose_with_water = _best_pose_path(result_with_water)
     val_with_water = (
