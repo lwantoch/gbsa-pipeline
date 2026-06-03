@@ -51,7 +51,7 @@ from gbsa_pipeline._openmm_utils import (
     _write_modeller_pdb,
 )
 from gbsa_pipeline._spatial import _find_clashing_residues
-from gbsa_pipeline.solvation_box import BoxShape, SolvatedComplex, SolvationParams, WaterModel
+from gbsa_pipeline.solvation_box import BoxShape, SolvatedComplex, SolvationParams
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,7 +59,6 @@ if TYPE_CHECKING:
     from gbsa_pipeline.parametrization import ParametrisedComplex
 
 logger = logging.getLogger(__name__)
-
 
 
 def solvate_openmm(
