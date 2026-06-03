@@ -8,6 +8,8 @@ import shutil
 from pathlib import Path
 from subprocess import CompletedProcess, run
 
+from rdkit import Chem
+
 from gbsa_pipeline.docking._utils import _require_file, _summarize_stderr, _write_process_log
 
 LOGGER = logging.getLogger(__name__)
@@ -27,11 +29,43 @@ def _strip_hetatm(receptor_pdb: Path, dest: Path) -> Path:
     return dest
 
 
+def _merge_sdfs_into_pdb(pdb: Path, sdfs: list[Path], output: Path) -> Path:
+    """Append cofactor SDF atoms to a protein PDB as HETATM records.
+
+    Each SDF is read with RDKit (hydrogens preserved) and its coordinate records
+    are appended after the protein ATOM lines so meeko assigns AutoDock atom
+    types to protein and cofactor(s) together in one pass.
+    """
+    protein_lines = [
+        line
+        for line in pdb.read_text(encoding="utf-8").splitlines(keepends=True)
+        if not line.startswith(("TER", "END"))
+    ]
+
+    cofactor_lines: list[str] = []
+    for sdf in sdfs:
+        supplier = Chem.SDMolSupplier(str(sdf), removeHs=False)
+        mol = next(iter(supplier), None)
+        if mol is None:
+            raise ValueError(f"Could not read cofactor SDF: {sdf}")
+        pdb_block = Chem.MolToPDBBlock(mol) or ""
+        cofactor_lines.extend(
+            line
+            for line in pdb_block.splitlines(keepends=True)
+            if line.startswith(("ATOM", "HETATM"))
+        )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("".join(protein_lines) + "".join(cofactor_lines) + "END\n", encoding="utf-8")
+    return output
+
+
 def convert_receptor_pdb_to_pdbqt(
     receptor_pdb: Path,
     output_path: Path | None = None,
     *,
     mk_prepare_receptor_binary: str = "mk_prepare_receptor.py",
+    cofactor_sdfs: list[Path] | None = None,
 ) -> Path:
     """Convert a receptor PDB to rigid receptor PDBQT using Meeko.
 
@@ -64,7 +98,19 @@ def convert_receptor_pdb_to_pdbqt(
 
     # Strip HETATM before Meeko so modified residues (CSD, PTR, …) stored as
     # HETATM with the same residue number as a protein ATOM don't cause errors.
-    pdb_for_meeko = _strip_hetatm(receptor_pdb, output_path.parent / f"{receptor_pdb.stem}_protein_only.pdb")
+    stripped = _strip_hetatm(receptor_pdb, output_path.parent / f"{receptor_pdb.stem}_protein_only.pdb")
+
+    # Merge cofactors after stripping so meeko assigns AutoDock atom types to
+    # both protein and cofactor atoms in one pass.
+    if cofactor_sdfs:
+        pdb_for_meeko = _merge_sdfs_into_pdb(
+            stripped,
+            cofactor_sdfs,
+            output_path.parent / f"{receptor_pdb.stem}_with_cofactor.pdb",
+        )
+        LOGGER.info("Merged %d cofactor(s) into receptor PDB for meeko.", len(cofactor_sdfs))
+    else:
+        pdb_for_meeko = stripped
 
     def _run_meeko(extra_args: list[str] = []) -> tuple[CompletedProcess[str], list[str]]:  # noqa: B006
         _cmd = [
