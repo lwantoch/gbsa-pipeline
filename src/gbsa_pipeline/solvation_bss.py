@@ -13,12 +13,13 @@ naturally fills crystal-water binding sites.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from gbsa_pipeline.solvation_box import SolvatedComplex, SolvationParams, WaterModel, run_solvation
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from gbsa_pipeline.parametrization import ParametrisedComplex
 
 logger = logging.getLogger(__name__)
@@ -41,13 +42,13 @@ def solvate_bss(
     parametrized:
         Dry protein-ligand complex from :func:`~gbsa_pipeline.parametrization.parametrize`.
     params:
-        Solvation box parameters (water model, padding, ion concentration, …).
+        Solvation box parameters (water model, padding, ion concentration, ...).
     output_gro:
         Path for the solvated GROMACS coordinate file.
     output_top:
         Path for the solvated GROMACS topology file.
 
-    Returns
+    Returns:
     -------
     SolvatedComplex
         Dataclass holding paths to the written GROMACS files.

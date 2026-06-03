@@ -320,10 +320,15 @@ def dock_with_and_without_crystal_waters(
         result_with_water = engine.dock(
             request.model_copy(update={"receptor": receptor_with_waters, "workdir": work_dir / "with_water"})
         )
-    except Exception as exc:
+    # Docking backends may raise backend-specific exceptions depending on the
+    # active executable, input structure, and search-space setup. This fallback
+    # intentionally catches broad failures because a failed with-water attempt
+    # should not prevent returning the no-water docking result.
+    except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
             "With-waters docking failed (%s: %s); falling back to no-water result.",
-            type(exc).__name__, exc,
+            type(exc).__name__,
+            exc,
         )
         return _no_water_manifest()
 
