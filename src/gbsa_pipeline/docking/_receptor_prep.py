@@ -67,7 +67,7 @@ def _build_polymer(pdb_string: str, set_template: dict[str, str]) -> object:
     templates = ResidueChemTemplates.create_from_defaults()
     try:
         return Polymer.from_pdb_string(
-            pdb_string, templates, mk_prep, set_template, delete_residues=[]
+            pdb_string, templates, mk_prep, set_template, residues_to_delete=[]
         )
     except PolymerCreationError as exc:
         raise RuntimeError(f"Meeko could not build polymer from PDB: {exc}") from exc
