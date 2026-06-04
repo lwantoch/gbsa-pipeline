@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 from pathlib import Path
-from subprocess import CompletedProcess, run
 
 from rdkit import Chem
 
-from gbsa_pipeline.docking._utils import _require_file, _summarize_stderr, _write_process_log
+from gbsa_pipeline.docking._utils import _require_file
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,41 +58,48 @@ def _merge_sdfs_into_pdb(pdb: Path, sdfs: list[Path], output: Path) -> Path:
     return output
 
 
+def _build_polymer(pdb_string: str, set_template: dict[str, str]) -> object:
+    """Build a Meeko Polymer from a PDB string, applying set_template overrides."""
+    from meeko import MoleculePreparation, PolymerCreationError, ResidueChemTemplates  # noqa: PLC0415
+    from meeko import Polymer  # noqa: PLC0415
+
+    mk_prep = MoleculePreparation.from_config({})
+    templates = ResidueChemTemplates.create_from_defaults()
+    try:
+        return Polymer.from_pdb_string(
+            pdb_string, templates, mk_prep, set_template, delete_residues=[]
+        )
+    except PolymerCreationError as exc:
+        raise RuntimeError(f"Meeko could not build polymer from PDB: {exc}") from exc
+
+
 def convert_receptor_pdb_to_pdbqt(
     receptor_pdb: Path,
     output_path: Path | None = None,
     *,
-    mk_prepare_receptor_binary: str = "mk_prepare_receptor.py",
     cofactor_sdfs: list[Path] | None = None,
 ) -> Path:
-    """Convert a receptor PDB to rigid receptor PDBQT using Meeko.
+    """Convert a receptor PDB to rigid receptor PDBQT using the Meeko Python API.
 
-    This helper exists because docking often starts from a receptor PDB even
-    when Vina requires a receptor PDBQT for execution.
-    The `mk_prepare_receptor_binary` parameter is configurable because different
-    environments may expose Meeko command-line tools through wrappers or explicit
-    executable names.
-    We currently use Meeko's `--read_pdb` path for plain PDB input so this helper
-    does not require ProDy for the simple rigid-receptor workflow tested here.
     Receptor hydrogen addition, protonation-state decisions, and structural
-    cleanup are still expected to happen upstream.
+    cleanup are expected to happen upstream (e.g. in stack_protein_prep).
+
+    Cross-chain disulfide bonds (CYX) are detected automatically: if Meeko
+    raises a paddings RuntimeError, the residues flagged as having excess
+    inter-residue bonds are retried as CYX.
     """
+    from meeko import PDBQTWriterLegacy  # noqa: PLC0415
+
     receptor_pdb = _require_file(Path(receptor_pdb), "Receptor PDB")
 
     if receptor_pdb.suffix.lower() != ".pdb":
         raise ValueError(f"Expected a .pdb receptor input, got: {receptor_pdb}")
-
-    if shutil.which(mk_prepare_receptor_binary) is None:
-        raise RuntimeError(f"Meeko receptor executable not found in PATH: {mk_prepare_receptor_binary}")
 
     if output_path is None:
         output_path = receptor_pdb.with_suffix(".pdbqt")
 
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    output_base = output_path.with_suffix("")
-    log_path = output_path.with_suffix(".meeko_receptor.log")
 
     # Strip HETATM before Meeko so modified residues (CSD, PTR, …) stored as
     # HETATM with the same residue number as a protein ATOM don't cause errors.
@@ -112,66 +117,53 @@ def convert_receptor_pdb_to_pdbqt(
     else:
         pdb_for_meeko = stripped
 
-    def _run_meeko(extra_args: list[str] = []) -> tuple[CompletedProcess[str], list[str]]:  # noqa: B006
-        _cmd = [
-            mk_prepare_receptor_binary,
-            "--read_pdb",
-            str(pdb_for_meeko),
-            "-o",
-            str(output_base),
-            "-p",
-            *extra_args,
-        ]
-        return run(_cmd, capture_output=True, text=True, check=False), _cmd  # noqa: S603
+    pdb_string = pdb_for_meeko.read_text(encoding="utf-8")
 
-    LOGGER.info(
-        "Preparing receptor with Meeko: %s -> %s",
-        receptor_pdb.name,
-        output_path.name,
-    )
+    LOGGER.info("Preparing receptor with Meeko Python API: %s → %s", receptor_pdb.name, output_path.name)
 
-    process, cmd = _run_meeko()
+    # Capture meeko polymer warnings so we can extract CYX residues if the
+    # paddings check fails (cross-chain disulfide bonds not in the CYS template).
+    _meeko_warnings: list[str] = []
 
-    # Cross-chain disulfide bonds cause "Expected N paddings … got 0". Retry
-    # with --set_template {chain}:{res}=CYX so Meeko uses the cystine template.
-    if process.returncode != 0 and "paddings" in process.stderr:
-        residues = re.findall(r"matched with excess inter-residue bond\(s\): (\S+)", process.stderr)
-        if residues:
-            template_arg = ",".join(f"{r}=CYX" for r in residues)
-            LOGGER.warning(
-                "Meeko: cross-chain CYS bonds detected (%s), retrying with --set_template %s",
-                ", ".join(residues), template_arg,
-            )
-            process, cmd = _run_meeko(["--set_template", template_arg])
+    class _WarningCapture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            _meeko_warnings.append(record.getMessage())
 
-    _write_process_log(
-        log_path,
-        process,
-        command=cmd,
-        title=f"Meeko receptor preparation log for {receptor_pdb.name}",
-    )
+    _handler = _WarningCapture()
+    _meeko_logger = logging.getLogger("meeko")
+    _meeko_logger.addHandler(_handler)
 
-    if process.returncode != 0:
-        raise RuntimeError(
-            "Meeko receptor preparation failed.\n"
-            f"Receptor: {receptor_pdb}\n"
-            f"Log: {log_path}\n"
-            f"stderr summary: {_summarize_stderr(process.stderr)}"
+    try:
+        polymer = _build_polymer(pdb_string, set_template={})
+    except RuntimeError as exc:
+        if "paddings" not in str(exc):
+            raise
+        # Identify the CYS residues with excess inter-residue bonds from logged warnings.
+        residues = re.findall(
+            r"matched with excess inter-residue bond\(s\): (\S+)",
+            "\n".join(_meeko_warnings),
         )
-
-    if not output_path.exists():
-        raise RuntimeError(
-            f"Meeko reported success but receptor PDBQT output is missing.\nExpected: {output_path}\nLog: {log_path}"
-        )
-
-    if process.stderr.strip():
+        if not residues:
+            raise
+        set_template = {r: "CYX" for r in residues}
         LOGGER.warning(
-            "Meeko receptor preparation finished with warnings; full details in %s",
-            log_path.name,
+            "Meeko: cross-chain CYS bonds detected (%s), retrying with CYX template.",
+            ", ".join(residues),
         )
-    else:
-        LOGGER.info("Meeko receptor PDBQT written: %s", output_path.name)
+        polymer = _build_polymer(pdb_string, set_template=set_template)
+    finally:
+        _meeko_logger.removeHandler(_handler)
 
+    pdbqt_string, _flex = PDBQTWriterLegacy.write_from_polymer(polymer)
+
+    if not pdbqt_string.strip():
+        raise RuntimeError(
+            f"Meeko produced an empty PDBQT for receptor: {receptor_pdb}\n"
+            "Check that the PDB contains valid protein ATOM records."
+        )
+
+    output_path.write_text(pdbqt_string, encoding="utf-8")
+    LOGGER.info("Meeko receptor PDBQT written: %s", output_path.name)
     return output_path
 
 

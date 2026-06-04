@@ -39,28 +39,16 @@ class VinaEngine:
     def __init__(
         self,
         binary: str = "vina",
-        mk_prepare_receptor_binary: str = "mk_prepare_receptor.py",
     ) -> None:
-        """Initialize executable names for Vina and Meeko receptor preparation.
+        """Initialize the Vina executable name.
 
-        The binary names are configurable because development and CI environments
-        often expose the tools under different names or wrappers.
-        Both parameters are required to keep receptor preparation and docking
-        execution under the same engine object without hard-coding global paths.
-        We are currently checking only whether the executables appear in PATH and
-        leaving actual runtime validity to the receptor-preparation and docking calls.
+        Receptor preparation is done via the Meeko Python API and does not
+        require a separate binary.
         """
         if shutil.which(binary) is None:
             LOGGER.warning("Vina binary not found in PATH: %s", binary)
 
-        if shutil.which(mk_prepare_receptor_binary) is None:
-            LOGGER.warning(
-                "Meeko receptor preparation binary not found in PATH: %s",
-                mk_prepare_receptor_binary,
-            )
-
         self.binary = binary
-        self.mk_prepare_receptor_binary = mk_prepare_receptor_binary
 
     def _build_command(
         self,
@@ -156,7 +144,6 @@ class VinaEngine:
             return convert_receptor_pdb_to_pdbqt(
                 receptor,
                 output_path=workdir / f"{receptor.stem}.pdbqt",
-                mk_prepare_receptor_binary=self.mk_prepare_receptor_binary,
                 cofactor_sdfs=cofactor_sdfs or [],
             )
         else:

@@ -38,8 +38,6 @@ DOCKING_TESTDATA = TESTDATA / "docking"
 DOCKLIGAND_SDF = DOCKING_TESTDATA / "dockligand.sdf"
 DOCKPROTEIN_PDB = DOCKING_TESTDATA / "dockprotein.pdb"
 
-MEEKO_RECEPTOR_BINARY = "mk_prepare_receptor.py"
-
 DOCKPROTEIN_BOX = DockingBox(
     center=(10.115, 39.148, 53.112),
     size=(10.0, 10.0, 10.0),
@@ -166,9 +164,6 @@ def test_meeko_receptor_pdb_to_pdbqt(tmp_path: Path) -> None:
     a basic receptor PDBQT file, because receptor protonation and cleanup are
     expected to happen upstream.
     """
-    if shutil.which(MEEKO_RECEPTOR_BINARY) is None:
-        pytest.skip(f"{MEEKO_RECEPTOR_BINARY} not available in PATH")
-
     if not DOCKPROTEIN_PDB.exists():
         pytest.skip(f"missing receptor test file: {DOCKPROTEIN_PDB}")
 
@@ -177,7 +172,6 @@ def test_meeko_receptor_pdb_to_pdbqt(tmp_path: Path) -> None:
     path = convert_receptor_pdb_to_pdbqt(
         DOCKPROTEIN_PDB,
         output_path=output,
-        mk_prepare_receptor_binary=MEEKO_RECEPTOR_BINARY,
     )
 
     assert path == output
@@ -376,9 +370,6 @@ def test_vina_binary_smoke(tmp_path: Path) -> None:
     if shutil.which("vina") is None:
         pytest.skip("vina not available in PATH")
 
-    if shutil.which(MEEKO_RECEPTOR_BINARY) is None:
-        pytest.skip(f"{MEEKO_RECEPTOR_BINARY} not available in PATH")
-
     if not DOCKPROTEIN_PDB.exists():
         pytest.skip(f"missing receptor test file: {DOCKPROTEIN_PDB}")
 
@@ -388,10 +379,7 @@ def test_vina_binary_smoke(tmp_path: Path) -> None:
     docking_input_pdbqt = tmp_path / "dockligand_for_docking.pdbqt"
     docking_output_pdbqt = tmp_path / "dockligand_for_docking_vina_out.pdbqt"
 
-    engine = VinaEngine(
-        binary="vina",
-        mk_prepare_receptor_binary=MEEKO_RECEPTOR_BINARY,
-    )
+    engine = VinaEngine(binary="vina")
 
     prepare_ligand_with_meeko(
         load_first_sdf_molecule(DOCKLIGAND_SDF, remove_hs=False),
@@ -439,9 +427,6 @@ def test_docked_pose_reconstruction_restores_chemistry_and_keeps_docked_position
     if shutil.which("vina") is None:
         pytest.skip("vina not available in PATH")
 
-    if shutil.which(MEEKO_RECEPTOR_BINARY) is None:
-        pytest.skip(f"{MEEKO_RECEPTOR_BINARY} not available in PATH")
-
     if not DOCKPROTEIN_PDB.exists():
         pytest.skip(f"missing receptor test file: {DOCKPROTEIN_PDB}")
 
@@ -462,10 +447,7 @@ def test_docked_pose_reconstruction_restores_chemistry_and_keeps_docked_position
     )
     _assert_basic_ligand_pdbqt_content(docking_input_pdbqt)
 
-    engine = VinaEngine(
-        binary="vina",
-        mk_prepare_receptor_binary=MEEKO_RECEPTOR_BINARY,
-    )
+    engine = VinaEngine(binary="vina")
     request = DockingRequest(
         receptor=DOCKPROTEIN_PDB,
         ligands=[docking_input_pdbqt],
