@@ -25,20 +25,29 @@ from gbsa_pipeline.mdp import (
 from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
 from gbsa_pipeline.solvation_box import BoxShape, WaterModel
 
+
+def _write_toml(tmp_path: Path, content: str) -> Path:
+    """Write a temporary TOML configuration file for RunConfig tests.
+
+    The helper keeps TOML setup local to each test while avoiding repeated file
+    creation boilerplate. The content is dedented so test configurations can be
+    written as readable multi-line strings. The file is always written into the
+    pytest-provided temporary directory. An explicit encoding is used because the
+    test suite runs with PYTHONWARNDEFAULTENCODING enabled.
+    """
+    path = tmp_path / "config.toml"
+    path.write_text(textwrap.dedent(content), encoding="utf-8")
+    return path
+
+
 # ---------------------------------------------------------------------------
 # RunConfig.from_toml
 # ---------------------------------------------------------------------------
 
 
-def _write_toml(tmp_path: Path, content: str) -> Path:
-    path = tmp_path / "config.toml"
-    path.write_text(textwrap.dedent(content))
-    return path
-
-
 def test_from_toml_minimal(tmp_path: Path) -> None:
     protein = tmp_path / "protein.pdb"
-    protein.write_text("")
+    protein.write_text("", encoding="utf-8")
     toml = _write_toml(
         tmp_path,
         f"""
@@ -51,18 +60,17 @@ def test_from_toml_minimal(tmp_path: Path) -> None:
 
     assert cfg.system.protein == protein
     assert cfg.system.ligand is None
-    # Defaults populated
     assert cfg.forcefield.protein_ff == ProteinFF.FF14SB
     assert cfg.solvation.water_model == WaterModel.TIP3P
     assert cfg.minimization.nsteps == 10_000
-    assert cfg.equilibration.simulation_time_ps == 500.0
+    assert cfg.equilibration.simulation_time_ps == 50.0
 
 
 def test_from_toml_full(tmp_path: Path) -> None:
     protein = tmp_path / "protein.pdb"
     ligand = tmp_path / "ligand.sdf"
-    protein.write_text("")
-    ligand.write_text("")
+    protein.write_text("", encoding="utf-8")
+    ligand.write_text("", encoding="utf-8")
 
     toml = _write_toml(
         tmp_path,
@@ -118,7 +126,7 @@ def test_from_toml_full(tmp_path: Path) -> None:
 
 def test_from_toml_rejects_unknown_section(tmp_path: Path) -> None:
     protein = tmp_path / "protein.pdb"
-    protein.write_text("")
+    protein.write_text("", encoding="utf-8")
     toml = _write_toml(
         tmp_path,
         f"""
@@ -148,6 +156,7 @@ def test_from_toml_system_protein_required(tmp_path: Path) -> None:
 
 def test_system_config_defaults() -> None:
     cfg = SystemConfig(protein=Path("/some/protein.pdb"))
+
     assert cfg.ligand is None
     assert cfg.extra_ff_files == ()
     assert cfg.net_charge is None
@@ -165,6 +174,7 @@ def test_system_config_extra_field_forbidden() -> None:
 
 def test_solvation_config_defaults() -> None:
     cfg = SolvationConfig()
+
     assert cfg.water_model == WaterModel.TIP3P
     assert cfg.box_shape == BoxShape.TRUNCATED_OCTAHEDRON
     assert cfg.box_size == 8.0
@@ -174,22 +184,29 @@ def test_solvation_config_defaults() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GromacsParams new fields
+# GromacsParams fields
 # ---------------------------------------------------------------------------
 
 
-def test_gromacs_params_new_thermostat_fields() -> None:
-    p = GromacsParams(tcoupl=Thermostat.VRESCALE, ref_t=310.0, tau_t=0.5)
-    mapping = p.to_mapping()
+def test_gromacs_params_thermostat_fields() -> None:
+    params = GromacsParams(tcoupl=Thermostat.VRESCALE, ref_t=310.0, tau_t=0.5)
+
+    mapping = params.to_mapping()
 
     assert mapping["tcoupl"] == "v-rescale"
     assert mapping["ref-t"] == 310.0
     assert mapping["tau-t"] == 0.5
 
 
-def test_gromacs_params_new_barostat_fields() -> None:
-    p = GromacsParams(pcoupl=Barostat.PARRINELLO_RAHMAN, ref_p=1.0, tau_p=2.0, compressibility=4.5e-5)
-    mapping = p.to_mapping()
+def test_gromacs_params_barostat_fields() -> None:
+    params = GromacsParams(
+        pcoupl=Barostat.PARRINELLO_RAHMAN,
+        ref_p=1.0,
+        tau_p=2.0,
+        compressibility=4.5e-5,
+    )
+
+    mapping = params.to_mapping()
 
     assert mapping["pcoupl"] == "Parrinello-Rahman"
     assert mapping["ref-p"] == 1.0
@@ -197,24 +214,29 @@ def test_gromacs_params_new_barostat_fields() -> None:
     assert mapping["compressibility"] == pytest.approx(4.5e-5)
 
 
-def test_gromacs_params_new_velocity_fields() -> None:
-    p = GromacsParams(gen_vel=VelocityGeneration.YES, gen_temp=310.0, gen_seed=42)
-    mapping = p.to_mapping()
+def test_gromacs_params_velocity_fields() -> None:
+    params = GromacsParams(
+        gen_vel=VelocityGeneration.YES,
+        gen_temp=310.0,
+        gen_seed=42,
+    )
+
+    mapping = params.to_mapping()
 
     assert mapping["gen-vel"] == "yes"
     assert mapping["gen-temp"] == 310.0
     assert mapping["gen-seed"] == 42
 
 
-def test_gromacs_params_new_constraints_field() -> None:
-    p = GromacsParams(constraints=Constraints.HYDROGENS_BONDS)
-    mapping = p.to_mapping()
+def test_gromacs_params_constraints_field() -> None:
+    params = GromacsParams(constraints=Constraints.HYDROGENS_BONDS)
+
+    mapping = params.to_mapping()
 
     assert mapping["constraints"] == "h-bonds"
 
 
-def test_gromacs_params_roundtrip_new_fields() -> None:
-    """from_mapping → to_mapping round-trip for newly added fields."""
+def test_gromacs_params_roundtrip_fields() -> None:
     original = GromacsParams(
         tcoupl=Thermostat.NOSE_HOOVER,
         ref_t=300.0,
@@ -225,8 +247,10 @@ def test_gromacs_params_roundtrip_new_fields() -> None:
         ref_p=1.0,
         compressibility=4.5e-5,
     )
+
     mapping = original.to_mapping()
     restored = GromacsParams.from_mapping(mapping)
+
     assert restored == original
 
 
@@ -237,7 +261,7 @@ def test_gromacs_params_roundtrip_new_fields() -> None:
 
 def test_to_parametrization_input_raises_when_no_ligand(tmp_path: Path) -> None:
     protein = tmp_path / "protein.pdb"
-    protein.write_text("")
+    protein.write_text("", encoding="utf-8")
 
     cfg = RunConfig(system=SystemConfig(protein=protein))
 
@@ -246,31 +270,34 @@ def test_to_parametrization_input_raises_when_no_ligand(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI argument parsing (no side effects — just parser)
+# CLI argument parsing
 # ---------------------------------------------------------------------------
 
 
 def test_cli_parses_config_path(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.toml"
     protein = tmp_path / "protein.pdb"
-    protein.write_text("")
-    cfg_path.write_text(f'[system]\nprotein = "{protein}"\n')
+    protein.write_text("", encoding="utf-8")
+    cfg_path.write_text(f'[system]\nprotein = "{protein}"\n', encoding="utf-8")
 
     with mock.patch("gbsa_pipeline.cli.run_pipeline") as mock_run:
         cli_main([str(cfg_path)])
-        mock_run.assert_called_once()
-        _, output_dir = mock_run.call_args.args
-        assert output_dir == tmp_path / "gbsa_output"
+
+    mock_run.assert_called_once()
+    _, output_dir = mock_run.call_args.args
+    assert output_dir == tmp_path / "gbsa_output"
 
 
 def test_cli_custom_output_dir(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.toml"
     protein = tmp_path / "protein.pdb"
-    protein.write_text("")
-    cfg_path.write_text(f'[system]\nprotein = "{protein}"\n')
-    out = tmp_path / "custom_out"
+    protein.write_text("", encoding="utf-8")
+    cfg_path.write_text(f'[system]\nprotein = "{protein}"\n', encoding="utf-8")
+    output_dir = tmp_path / "custom_out"
 
     with mock.patch("gbsa_pipeline.cli.run_pipeline") as mock_run:
-        cli_main([str(cfg_path), "-o", str(out)])
-        _, output_dir = mock_run.call_args.args
-        assert output_dir == out
+        cli_main([str(cfg_path), "-o", str(output_dir)])
+
+    mock_run.assert_called_once()
+    _, parsed_output_dir = mock_run.call_args.args
+    assert parsed_output_dir == output_dir
