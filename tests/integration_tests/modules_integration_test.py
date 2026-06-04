@@ -52,8 +52,6 @@ DOCKLIGAND_SDF = DOCKING_TESTDATA / "dockligand.sdf"
 DOCKPROTEIN_PDB = DOCKING_TESTDATA / "dockprotein.pdb"
 PARAMETRIZE_PROTEIN_PDB = DOCKING_TESTDATA / "dockprotein_crystal_waters.pdb"
 
-MEEKO_RECEPTOR_BINARY = "mk_prepare_receptor.py"
-
 DOCKPROTEIN_BOX = DockingBox(
     center=(-2.215, -0.043, 25.120),
     size=(17.0, 17.0, 17.0),
@@ -345,9 +343,6 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     if shutil.which("vina") is None:
         pytest.skip("vina not available in PATH")
 
-    if shutil.which(MEEKO_RECEPTOR_BINARY) is None:
-        pytest.skip(f"{MEEKO_RECEPTOR_BINARY} not available in PATH")
-
     if not DOCKLIGAND_SDF.exists():
         pytest.skip(f"missing ligand test file: {DOCKLIGAND_SDF}")
 
@@ -395,7 +390,6 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     prepared_receptor = convert_receptor_pdb_to_pdbqt(
         DOCKPROTEIN_PDB,
         output_path=receptor_pdbqt,
-        mk_prepare_receptor_binary=MEEKO_RECEPTOR_BINARY,
     )
 
     assert prepared_ligand == ligand_pdbqt
@@ -403,10 +397,7 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     assert ligand_pdbqt.exists()
     assert receptor_pdbqt.exists()
 
-    engine = VinaEngine(
-        binary="vina",
-        mk_prepare_receptor_binary=MEEKO_RECEPTOR_BINARY,
-    )
+    engine = VinaEngine(binary="vina")
     # Use PDB receptor so dock_with_and_without_crystal_waters can merge crystal
     # waters into a receptor+waters PDB for the second docking run.
     request = DockingRequest(
