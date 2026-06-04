@@ -616,7 +616,9 @@ def _write_dry_protein_pdb(protein_pdb: Path, output_pdb: Path) -> Path:
                 del chain[ri]
 
     output_pdb.parent.mkdir(parents=True, exist_ok=True)
-    st.write_pdb(str(output_pdb))
+    opts = gemmi.PdbWriteOptions()
+    opts.ter_ignores_type = True
+    st.write_pdb(str(output_pdb), opts)
     return output_pdb
 
 
