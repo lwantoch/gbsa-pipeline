@@ -188,8 +188,6 @@ def _strip_mol2_dipeptide_caps_parmed(
     protein_pdb: Path | None = None,
 ) -> Path:
     """ParmEd-based cap stripping: load mol2, rename backbone atoms, strip ACE/NME, save."""
-    import parmed as pmd
-
     structure = pmd.load_file(str(mol2_path))
 
     res_names = {r.name.upper() for r in structure.residues}
@@ -243,9 +241,12 @@ def _strip_mol2_dipeptide_caps_parmed(
     )
     backbone_cb = next(
         (
-            nb for nb in adj_pmd[backbone_ca.idx]
-            if nb is not backbone_n and nb is not backbone_c
-            and nb.idx not in cap_idx and nb.type.lower() == "c3"
+            nb
+            for nb in adj_pmd[backbone_ca.idx]
+            if nb is not backbone_n
+            and nb is not backbone_c
+            and nb.idx not in cap_idx
+            and nb.type.lower() == "c3"
             and nb is not backbone_ha
         ),
         None,
@@ -253,22 +254,36 @@ def _strip_mol2_dipeptide_caps_parmed(
     backbone_hb_atoms: list[pmd.Atom] = []
     if backbone_cb is not None:
         backbone_hb_atoms = [
-            nb for nb in adj_pmd[backbone_cb.idx]
-            if nb.type.lower() in {"h1", "hc", "hx"} and nb.idx not in cap_idx
+            nb for nb in adj_pmd[backbone_cb.idx] if nb.type.lower() in {"h1", "hc", "hx"} and nb.idx not in cap_idx
         ]
 
-    backbone_n.name = "N";   backbone_n.type   = _AMBER_BACKBONE_TYPE["backbone_N"]
-    backbone_ca.name = "CA"; backbone_ca.type  = _AMBER_BACKBONE_TYPE["backbone_CA"]
-    backbone_c.name = "C";   backbone_c.type   = _AMBER_BACKBONE_TYPE["backbone_C"]
-    backbone_o.name = "O";   backbone_o.type   = _AMBER_BACKBONE_TYPE["backbone_O"]
+    backbone_n.name = "N"
+    backbone_n.type = _AMBER_BACKBONE_TYPE["backbone_N"]
+
+    backbone_ca.name = "CA"
+    backbone_ca.type = _AMBER_BACKBONE_TYPE["backbone_CA"]
+
+    backbone_c.name = "C"
+    backbone_c.type = _AMBER_BACKBONE_TYPE["backbone_C"]
+
+    backbone_o.name = "O"
+    backbone_o.type = _AMBER_BACKBONE_TYPE["backbone_O"]
+
     if backbone_ha:
-        backbone_ha.name = "HA"; backbone_ha.type = _AMBER_BACKBONE_TYPE["backbone_HA"]
+        backbone_ha.name = "HA"
+        backbone_ha.type = _AMBER_BACKBONE_TYPE["backbone_HA"]
+
     if backbone_h:
-        backbone_h.name = "H";  backbone_h.type  = _AMBER_BACKBONE_TYPE["backbone_H"]
+        backbone_h.name = "H"
+        backbone_h.type = _AMBER_BACKBONE_TYPE["backbone_H"]
+
     if backbone_cb:
-        backbone_cb.name = "CB"; backbone_cb.type = _AMBER_BACKBONE_TYPE["backbone_CB"]
+        backbone_cb.name = "CB"
+        backbone_cb.type = _AMBER_BACKBONE_TYPE["backbone_CB"]
+
     for i, hb in enumerate(backbone_hb_atoms, start=2):
-        hb.name = f"HB{i}"; hb.type = _AMBER_BACKBONE_TYPE["backbone_HB"]
+        hb.name = f"HB{i}"
+        hb.type = _AMBER_BACKBONE_TYPE["backbone_HB"]
 
     resname = structure.residues[0].name.strip() if structure.residues else "UNK"
     pdb_names_by_depth: dict[tuple[str, int], list[str]] = {}
@@ -277,7 +292,20 @@ def _strip_mol2_dipeptide_caps_parmed(
             pdb_names_by_depth = _pdb_sidechain_names_by_depth(protein_pdb, resname)
 
     if pdb_names_by_depth:
-        named_idx = {a.idx for a in [backbone_n, backbone_ca, backbone_c, backbone_o, backbone_ha, backbone_h, backbone_cb, *backbone_hb_atoms] if a is not None}
+        named_idx = {
+            a.idx
+            for a in [
+                backbone_n,
+                backbone_ca,
+                backbone_c,
+                backbone_o,
+                backbone_ha,
+                backbone_h,
+                backbone_cb,
+                *backbone_hb_atoms,
+            ]
+            if a is not None
+        }
         mol2_depth: dict[int, int] = {backbone_ca.idx: 0}
         bfs_q = [backbone_ca]
         while bfs_q:
@@ -301,7 +329,7 @@ def _strip_mol2_dipeptide_caps_parmed(
                 atom.name = pdb_name
                 pdb_names_used.add(pdb_name)
 
-    structure.strip(":ACE,NME")
+    structure.strip(":ACE,NME")  # noqa: B005
     output_mol2.parent.mkdir(parents=True, exist_ok=True)
     structure.save(str(output_mol2), format="mol2", overwrite=True)
     return output_mol2
@@ -318,7 +346,12 @@ def _strip_mol2_dipeptide_caps(
     """
     try:
         return _strip_mol2_dipeptide_caps_parmed(mol2_path, output_mol2, protein_pdb)
-    except Exception:
+    except (OSError, ValueError, RuntimeError) as exc:
+        logger.warning(
+            "ParmEd cap stripping failed for %s; falling back to text-based stripping: %s",
+            mol2_path,
+            exc,
+        )
         return _strip_mol2_dipeptide_caps_text(mol2_path, output_mol2, protein_pdb)
 
 
