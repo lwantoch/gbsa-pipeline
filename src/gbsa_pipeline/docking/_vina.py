@@ -140,14 +140,13 @@ class VinaEngine:
 
         if receptor.suffix.lower() == ".pdbqt":
             return receptor
-        elif receptor.suffix.lower() == ".pdb":
+        if receptor.suffix.lower() == ".pdb":
             return convert_receptor_pdb_to_pdbqt(
                 receptor,
                 output_path=workdir / f"{receptor.stem}.pdbqt",
                 cofactor_sdfs=cofactor_sdfs or [],
             )
-        else:
-            raise ValueError(f"Unsupported receptor file type for docking: {receptor}")
+        raise ValueError(f"Unsupported receptor file type for docking: {receptor}")
 
     def dock(self, request: DockingRequest) -> DockingResult:
         """Run docking for all ligands in the request.
