@@ -177,7 +177,6 @@ def solvate_openmm(
     return SolvatedComplex(
         gro_file=output_gro,
         top_file=output_top,
-        parmed_structure=structure,
     )
 
 

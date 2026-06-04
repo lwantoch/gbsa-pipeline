@@ -64,7 +64,15 @@ class EquilibrationConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    simulation_time_ps: float = 500.0
+    simulation_time_ps: float = 50.0
+
+
+class NptConfig(BaseModel):
+    """[npt_equilibration] section — NPT equilibration time."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    simulation_time_ps: float = 100.0
 
 
 class RunConfig(BaseModel):
@@ -73,6 +81,11 @@ class RunConfig(BaseModel):
     Load from a TOML file with :meth:`from_toml`. Each section maps to a
     nested model. The ``[md]`` section accepts any field of
     :class:`~gbsa_pipeline.mdp.GromacsParams`.
+
+    Stages (in order):
+    1. Parametrize  2. Solvate (BSS)  3. SD minimization  4. CG minimization
+    5. NVT restrained heating  6. NPT restrained  7. NPT unrestrained
+    8. Production MD
 
     Example:
     -------
@@ -83,10 +96,16 @@ class RunConfig(BaseModel):
 
     [solvation]
     water_model = "tip3p"
-    padding = 10.0
+    padding = 1.0
+
+    [equilibration]
+    simulation_time_ps = 50.0
+
+    [npt_equilibration]
+    simulation_time_ps = 100.0
 
     [md]
-    nsteps = 500000
+    nsteps = 250000
     dt = 0.002
     tcoupl = "v-rescale"
     ref_t = 300.0
@@ -100,6 +119,7 @@ class RunConfig(BaseModel):
     solvation: SolvationConfig = Field(default_factory=SolvationConfig)
     minimization: MinimizationConfig = Field(default_factory=MinimizationConfig)
     equilibration: EquilibrationConfig = Field(default_factory=EquilibrationConfig)
+    npt_equilibration: NptConfig = Field(default_factory=NptConfig)
     md: GromacsParams = Field(default_factory=GromacsParams)
 
     @classmethod
