@@ -8,10 +8,18 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 import BioSimSpace as BSS
 
-from gbsa_pipeline.md import run_heating, run_production
-from gbsa_pipeline.parametrization import export_gromacs_top_gro, parametrize
-from gbsa_pipeline.solvation_box import SolvatedComplex, SolvationParams
-from gbsa_pipeline.solvation_openmm import solvate_openmm
+from gbsa_pipeline.md import (
+    remove_clashing_solvent_waters,
+    run_heating,
+    run_minimization,
+    run_npt_equilibration,
+    run_production,
+    run_solvent_relaxation,
+)
+from gbsa_pipeline.md_io import save_bss_system_to_gromacs
+from gbsa_pipeline.parametrization import parametrize
+from gbsa_pipeline.solvation_bss import solvate_bss
+from gbsa_pipeline.solvation_box import SolvationParams
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,13 +38,7 @@ _T = TypeVar("_T")
 
 
 def _run_stage(name: str, fn: Callable[[], _T]) -> _T:
-    """Run a named pipeline stage with logging and elapsed-time reporting.
-
-    The stage name is logged on entry and exit so long-running runs produce a
-    readable trace. Elapsed time is always reported, even on failure, to help
-    diagnose slow or hanging stages. Any exception is re-raised after logging so
-    the caller can decide how to handle pipeline failures.
-    """
+    """Run a named pipeline stage with logging and elapsed-time reporting."""
     logger.info("  [%s] starting …", name)
     t0 = time.perf_counter()
     try:
@@ -71,7 +73,7 @@ def _stage_solvate(
     parametrized: ParametrisedComplex,
     stage_dir: Path,
 ) -> Any:
-    """Solvate with OpenMM + ParmEd and return the loaded BSS system."""
+    """Solvate with BSS.Solvent (gmx solvate + gmx genion) and return loaded BSS system."""
     sol = config.solvation
     box_desc = f"padding={sol.padding} nm" if sol.padding is not None else f"box_size={sol.box_size} nm"
     logger.info(
@@ -81,7 +83,7 @@ def _stage_solvate(
         box_desc,
         sol.ion_concentration,
     )
-    solvated: SolvatedComplex = solvate_openmm(
+    solvated = solvate_bss(
         parametrized=parametrized,
         params=_to_solvation_params(sol),
         output_gro=stage_dir / "solvated.gro",
@@ -95,68 +97,65 @@ def _stage_solvate(
     return system
 
 
-def _stage_minimize(config: RunConfig, system: Any, stage_dir: Path) -> Any:
-    """Run energy minimization via GROMACS using a BSS Minimisation protocol.
-
-    BioSimSpace owns the base MDP (``integrator = steep``) so the minimization
-    protocol is always correctly configured. ``nsteps`` and ``emtol`` from
-    the run config are passed directly to ``BSS.Protocol.Minimisation``.
-    """
-    logger.info(
-        "  nsteps=%d  emtol=%.1f kJ/mol/nm",
-        config.minimization.nsteps,
-        config.minimization.emtol,
-    )
-    protocol = BSS.Protocol.Minimisation(steps=config.minimization.nsteps)
-    process = BSS.Process.Gromacs(
+def _stage_minimize_sd(config: RunConfig, system: Any, stage_dir: Path) -> Any:
+    """Steepest-descent energy minimization."""
+    logger.info("  nsteps=%d  emtol=%.1f kJ/mol/nm", config.minimization.nsteps, config.minimization.emtol)
+    return run_minimization(
         system,
-        protocol,
-        name="min",
-        ignore_warnings=True,
-        work_dir=str(stage_dir),
+        work_dir=stage_dir,
+        params={"nsteps": config.minimization.nsteps, "emtol": config.minimization.emtol},
     )
-    process.start()
-    result = process.getSystem(block=True)
-
-    if result is None:
-        raise RuntimeError(
-            f"Minimization finished without a readable output system. Check GROMACS logs in {stage_dir}."
-        )
-    return result
 
 
-def _stage_equilibrate(config: RunConfig, system: Any, stage_dir: Path) -> Any:
-    """Heat from 0 K to 300 K under NVT with backbone restraints."""
+def _stage_minimize_cg(system: Any, stage_dir: Path) -> Any:
+    """Conjugate-gradient energy minimization."""
+    return run_minimization(system, work_dir=stage_dir, params={"integrator": "cg"})
+
+
+def _stage_nvt_restrained(config: RunConfig, system: Any, stage_dir: Path) -> Any:
+    """Water clash removal → short solvent relax → NVT heating 50→300 K with backbone restraints."""
+    logger.info("  NVT heating over %.1f ps", config.equilibration.simulation_time_ps)
+
+    system = remove_clashing_solvent_waters(system, work_dir=stage_dir / "water_cleanup")
+    system = run_solvent_relaxation(system, work_dir=stage_dir / "solvent_relax")
+
     equil_time = config.equilibration.simulation_time_ps * BSS.Units.Time.picosecond
-    logger.info("  NVT heating 0→300 K over %.1f ps", config.equilibration.simulation_time_ps)
     return run_heating(
         equil_time,
         system,
         work_dir=stage_dir,
-        temperature_start=0 * BSS.Units.Temperature.kelvin,
+        temperature_start=50 * BSS.Units.Temperature.kelvin,
         temperature_end=300 * BSS.Units.Temperature.kelvin,
         restraint="backbone",
     )
 
 
+def _stage_npt_restrained(config: RunConfig, system: Any, stage_dir: Path) -> Any:
+    """NPT equilibration with backbone restraints."""
+    logger.info("  %.1f ps  restraint=backbone", config.npt_equilibration.simulation_time_ps)
+    npt_time = config.npt_equilibration.simulation_time_ps * BSS.Units.Time.picosecond
+    return run_npt_equilibration(npt_time, system, work_dir=stage_dir, restraint="backbone")
+
+
+def _stage_npt(config: RunConfig, system: Any, stage_dir: Path) -> Any:
+    """NPT equilibration without restraints."""
+    logger.info("  %.1f ps  restraint=none", config.npt_equilibration.simulation_time_ps)
+    npt_time = config.npt_equilibration.simulation_time_ps * BSS.Units.Time.picosecond
+    return run_npt_equilibration(npt_time, system, work_dir=stage_dir, restraint=None)
+
+
 def _stage_production(config: RunConfig, system: Any, stage_dir: Path) -> Any:
-    """Run production MD using ``config.md`` parameters."""
+    """Production MD."""
+    sim_time = config.md.nsteps * config.md.dt * BSS.Units.Time.picosecond
     logger.info(
-        "  integrator=%s  nsteps=%d  dt=%s ps  tcoupl=%s  pcoupl=%s",
-        config.md.integrator,
+        "  nsteps=%d  dt=%s ps  sim_time=%.1f ps  tcoupl=%s  pcoupl=%s",
         config.md.nsteps,
         config.md.dt,
+        config.md.nsteps * config.md.dt,
         config.md.tcoupl,
         config.md.pcoupl,
     )
-    # Compute simulation time from nsteps * dt (GROMACS dt is in picoseconds).
-    sim_time = config.md.nsteps * config.md.dt * BSS.Units.Time.picosecond
-    return run_production(
-        simulation_time=sim_time,
-        equilibrated=system,
-        work_dir=stage_dir,
-        params=config.md,
-    )
+    return run_production(sim_time, system, work_dir=stage_dir, params=config.md)
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +169,13 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
     Stages (each writes output to a numbered subdirectory):
 
     1. **Parametrize** — assign force field parameters to protein + ligand.
-    2. **Solvate** — add water box and counter-ions.
-    3. **Minimize** — energy minimization.
-    4. **Equilibrate** — NVT heating from 0 K to 300 K.
-    5. **Production MD** — NpT simulation driven by ``[md]`` section params.
+    2. **Solvate** — add water box and counter-ions via BSS.Solvent.
+    3. **SD Minimization** — steepest-descent energy minimization.
+    4. **CG Minimization** — conjugate-gradient energy minimization.
+    5. **NVT Restrained** — water cleanup, solvent relax, NVT heating 50→300 K.
+    6. **NPT Restrained** — NPT equilibration with backbone restraints.
+    7. **NPT** — NPT equilibration without restraints.
+    8. **Production MD** — NpT simulation driven by ``[md]`` section params.
 
     Parameters
     ----------
@@ -187,42 +189,63 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
     _log_config(config, output_dir)
 
     # Stage 1: Parametrize
-    logger.info("─── Stage 1/5: Parametrization ───")
+    logger.info("─── Stage 1/8: Parametrization ───")
     param_dir = output_dir / "01_parametrize"
     parametrized = _run_stage("parametrize", lambda: _stage_parametrize(config, param_dir))
     logger.info("  Done → %s, %s", parametrized.gro_file.name, parametrized.top_file.name)
 
     # Stage 2: Solvate
-    logger.info("─── Stage 2/5: Solvation ───")
+    logger.info("─── Stage 2/8: Solvation ───")
     sol_dir = output_dir / "02_solvated"
     system = _run_stage("solvation", lambda: _stage_solvate(config, parametrized, sol_dir))
 
-    # Stage 3: Minimize
-    logger.info("─── Stage 3/5: Minimization ───")
-    min_dir = output_dir / "03_minimized"
-    min_dir.mkdir(parents=True, exist_ok=True)
-    system = _run_stage("minimization", lambda: _stage_minimize(config, system, min_dir))
-    logger.info("  Done. Saving …")
-    export_gromacs_top_gro(system, str(min_dir / "minimized"))
-    logger.info("  Saved → 03_minimized/minimized.gro / .top")
+    # Stage 3: SD minimization
+    logger.info("─── Stage 3/8: SD Minimization ───")
+    sd_dir = output_dir / "03_sd"
+    sd_dir.mkdir(parents=True, exist_ok=True)
+    system = _run_stage("sd_minimization", lambda: _stage_minimize_sd(config, system, sd_dir))
+    save_bss_system_to_gromacs(system, sd_dir / "system")
+    logger.info("  Saved → 03_sd/system.gro / .top")
 
-    # Stage 4: Equilibrate
-    logger.info("─── Stage 4/5: Equilibration ───")
-    equil_dir = output_dir / "04_equilibrated"
-    equil_dir.mkdir(parents=True, exist_ok=True)
-    system = _run_stage("equilibration", lambda: _stage_equilibrate(config, system, equil_dir))
-    logger.info("  Done. Saving …")
-    export_gromacs_top_gro(system, str(equil_dir / "equilibrated"))
-    logger.info("  Saved → 04_equilibrated/equilibrated.gro / .top")
+    # Stage 4: CG minimization
+    logger.info("─── Stage 4/8: CG Minimization ───")
+    cg_dir = output_dir / "04_cg"
+    cg_dir.mkdir(parents=True, exist_ok=True)
+    system = _run_stage("cg_minimization", lambda: _stage_minimize_cg(system, cg_dir))
+    save_bss_system_to_gromacs(system, cg_dir / "system")
+    logger.info("  Saved → 04_cg/system.gro / .top")
 
-    # Stage 5: Production MD
-    logger.info("─── Stage 5/5: Production MD ───")
-    prod_dir = output_dir / "05_production"
+    # Stage 5: NVT restrained heating
+    logger.info("─── Stage 5/8: NVT Restrained Heating ───")
+    nvt_dir = output_dir / "05_nvt_res"
+    nvt_dir.mkdir(parents=True, exist_ok=True)
+    system = _run_stage("nvt_restrained", lambda: _stage_nvt_restrained(config, system, nvt_dir))
+    save_bss_system_to_gromacs(system, nvt_dir / "system")
+    logger.info("  Saved → 05_nvt_res/system.gro / .top")
+
+    # Stage 6: NPT restrained equilibration
+    logger.info("─── Stage 6/8: NPT Restrained Equilibration ───")
+    npt_res_dir = output_dir / "06_npt_res"
+    npt_res_dir.mkdir(parents=True, exist_ok=True)
+    system = _run_stage("npt_restrained", lambda: _stage_npt_restrained(config, system, npt_res_dir))
+    save_bss_system_to_gromacs(system, npt_res_dir / "system")
+    logger.info("  Saved → 06_npt_res/system.gro / .top")
+
+    # Stage 7: NPT unrestrained equilibration
+    logger.info("─── Stage 7/8: NPT Equilibration ───")
+    npt_dir = output_dir / "07_npt"
+    npt_dir.mkdir(parents=True, exist_ok=True)
+    system = _run_stage("npt", lambda: _stage_npt(config, system, npt_dir))
+    save_bss_system_to_gromacs(system, npt_dir / "system")
+    logger.info("  Saved → 07_npt/system.gro / .top")
+
+    # Stage 8: Production MD
+    logger.info("─── Stage 8/8: Production MD ───")
+    prod_dir = output_dir / "08_production"
     prod_dir.mkdir(parents=True, exist_ok=True)
     system = _run_stage("production_md", lambda: _stage_production(config, system, prod_dir))
-    logger.info("  Done. Saving …")
-    export_gromacs_top_gro(system, str(prod_dir / "production"))
-    logger.info("  Saved → 05_production/production.gro / .top")
+    save_bss_system_to_gromacs(system, prod_dir / "system")
+    logger.info("  Saved → 08_production/system.gro / .top")
 
     logger.info("Pipeline complete. Output written to %s", output_dir)
 

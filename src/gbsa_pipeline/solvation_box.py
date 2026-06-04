@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Self
 
@@ -17,15 +17,11 @@ class SolvatedComplex:
     """Solvated protein-ligand complex produced by a solvation helper.
 
     Carries the paths to the GROMACS files written for inspection, checkpointing,
-    and direct loading by downstream MD stages. The optional ``parmed_structure``
-    is populated by the OpenMM-based solvation path only; it is ``None`` when the
-    GROMACS-native BSS path is used. Downstream code should consume only
-    ``gro_file`` and ``top_file`` unless it explicitly needs the in-memory object.
+    and direct loading by downstream MD stages.
     """
 
     gro_file: Path
     top_file: Path
-    parmed_structure: Any = field(default=None, hash=False, compare=False, repr=False)
 
     def load_bss(self) -> Any:
         """Load this complex as a BioSimSpace System for MD stages."""
