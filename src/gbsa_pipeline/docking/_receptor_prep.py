@@ -48,9 +48,7 @@ def _merge_sdfs_into_pdb(pdb: Path, sdfs: list[Path], output: Path) -> Path:
             raise ValueError(f"Could not read cofactor SDF: {sdf}")
         pdb_block = Chem.MolToPDBBlock(mol) or ""
         cofactor_lines.extend(
-            line
-            for line in pdb_block.splitlines(keepends=True)
-            if line.startswith(("ATOM", "HETATM"))
+            line for line in pdb_block.splitlines(keepends=True) if line.startswith(("ATOM", "HETATM"))
         )
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -60,15 +58,17 @@ def _merge_sdfs_into_pdb(pdb: Path, sdfs: list[Path], output: Path) -> Path:
 
 def _build_polymer(pdb_string: str, set_template: dict[str, str]) -> object:
     """Build a Meeko Polymer from a PDB string, applying set_template overrides."""
-    from meeko import MoleculePreparation, PolymerCreationError, ResidueChemTemplates  # noqa: PLC0415
-    from meeko import Polymer  # noqa: PLC0415
+    from meeko import (  # noqa: PLC0415
+        MoleculePreparation,
+        Polymer,
+        PolymerCreationError,
+        ResidueChemTemplates,
+    )
 
     mk_prep = MoleculePreparation.from_config({})
     templates = ResidueChemTemplates.create_from_defaults()
     try:
-        return Polymer.from_pdb_string(
-            pdb_string, templates, mk_prep, set_template, residues_to_delete=[]
-        )
+        return Polymer.from_pdb_string(pdb_string, templates, mk_prep, set_template, residues_to_delete=[])
     except PolymerCreationError as exc:
         raise RuntimeError(f"Meeko could not build polymer from PDB: {exc}") from exc
 
@@ -145,7 +145,7 @@ def convert_receptor_pdb_to_pdbqt(
         )
         if not residues:
             raise
-        set_template = {r: "CYX" for r in residues}
+        set_template = dict.fromkeys(residues, "CYX")
         LOGGER.warning(
             "Meeko: cross-chain CYS bonds detected (%s), retrying with CYX template.",
             ", ".join(residues),
