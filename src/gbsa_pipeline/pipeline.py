@@ -18,8 +18,8 @@ from gbsa_pipeline.md import (
 )
 from gbsa_pipeline.md_io import save_bss_system_to_gromacs
 from gbsa_pipeline.parametrization import parametrize
-from gbsa_pipeline.solvation_bss import solvate_bss
 from gbsa_pipeline.solvation_box import SolvationParams
+from gbsa_pipeline.solvation_bss import solvate_bss
 
 if TYPE_CHECKING:
     from pathlib import Path
