@@ -573,64 +573,50 @@ def _strip_mol2_dipeptide_caps_text(
 def _write_dry_protein_pdb(protein_pdb: Path, output_pdb: Path) -> Path:
     """Write a PDB for tleap: strip water and H, adapt heavy-atom names to AMBER.
 
-    Uses line-based filtering to preserve original PDB residue numbers — critical
-    for MCPB.py workflows where tleap bond commands reference specific residue IDs.
+    Uses gemmi to preserve original PDB residue numbers — critical for MCPB.py
+    workflows where tleap bond commands reference specific residue IDs.
     Renames heavy atoms that differ between standard PDB/GROMACS convention and
     AMBER ff14SB (OC1→O, OC2→OXT, ILE CD→CD1). H atoms are stripped so tleap
     re-adds them with correct ff14SB names.
+
+    TER placement: gemmi writes TER after the last polymer (ATOM) residue in each
+    chain, before any non-polymer (HETATM) residues such as metals.  This is the
+    exact behaviour tleap requires to recognise the C-terminal residue and apply
+    the CLYS/CXXX template; without TER, saveAmberParm fails on the OXT atom.
     """
+    import gemmi  # noqa: PLC0415
+
     amber_renames: dict[tuple[str, str], str] = {
         ("OC1", ""): "O",
         ("OC2", ""): "OXT",
         ("CD", "ILE"): "CD1",
     }
 
-    def _rename_atom_in_line(line: str) -> str:
-        atom_name = line[12:16].strip()
-        resname = line[17:20].strip().upper()
-        # element column (cols 77-78, 1-indexed) gives definitive H detection.
-        element = line[PDB_ELEMENT_START:PDB_ELEMENT_END].strip().upper() if len(line) > PDB_ELEMENT_START else ""
-        if element == "H" or (not element and atom_name and atom_name[0] == "H"):
-            return ""  # strip hydrogen
-        new_name = amber_renames.get((atom_name, resname)) or amber_renames.get((atom_name, ""))
-        if new_name is None:
-            return line
-        # Rewrite cols 13-16 (atom name field, 1-indexed) preserving all others.
-        n = len(new_name)
-        if n >= PDB_ATOM_NAME_WIDTH:
-            padded = new_name[:PDB_ATOM_NAME_WIDTH]
-        elif n == THREE_CHAR_ATOM_NAME_LENGTH:
-            padded = " " + new_name
-        elif n == MIN_GREEK_ATOM_NAME_LENGTH:
-            padded = " " + new_name + " "
-        else:
-            padded = " " + new_name + "  "
-        return line[:12] + padded + line[16:]
+    st = gemmi.read_pdb_string(protein_pdb.read_text(encoding="utf-8", errors="replace"))
 
-    lines_out: list[str] = []
-    last_written_rec: str | None = None
-    for raw_line in protein_pdb.read_text(encoding="utf-8", errors="replace").splitlines():
-        rec = raw_line[:6].strip().upper()
-        if rec not in ("ATOM", "HETATM"):
-            if rec == "END":
-                lines_out.append(raw_line)
-            continue
-        resname = raw_line[17:20].strip().upper()
-        if resname in _WATER_RESIDUE_NAMES_SET:
-            continue
-        new_line = _rename_atom_in_line(raw_line)
-        if not new_line:
-            continue
-        # Insert TER between the protein ATOM chain and any HETATM residues
-        # (e.g. MCPB.py ZN1).  Without TER, tleap does not recognise the last
-        # ATOM residue as C-terminal → CLYS/CXXX template not applied → OXT
-        # atom has no type → saveAmberParm fails.
-        if rec == "HETATM" and last_written_rec == "ATOM":
-            lines_out.append("TER")
-        lines_out.append(new_line)
-        last_written_rec = rec
+    for model in st:
+        for chain in model:
+            res_indices_to_remove: list[int] = []
+            for ri, residue in enumerate(chain):
+                if residue.name.upper() in _WATER_RESIDUE_NAMES_SET:
+                    res_indices_to_remove.append(ri)
+                    continue
+                resname = residue.name.upper()
+                atom_indices_to_remove: list[int] = []
+                for ai, atom in enumerate(residue):
+                    if atom.is_hydrogen():
+                        atom_indices_to_remove.append(ai)
+                    else:
+                        new_name = amber_renames.get((atom.name, resname)) or amber_renames.get((atom.name, ""))
+                        if new_name:
+                            atom.name = new_name
+                for ai in reversed(atom_indices_to_remove):
+                    del residue[ai]
+            for ri in reversed(res_indices_to_remove):
+                del chain[ri]
 
-    output_pdb.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
+    output_pdb.parent.mkdir(parents=True, exist_ok=True)
+    st.write_pdb(str(output_pdb))
     return output_pdb
 
 
