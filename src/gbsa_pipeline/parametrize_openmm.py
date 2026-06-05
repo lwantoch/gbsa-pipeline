@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import pickle
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -215,9 +213,5 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
         parmed_structure=structure,
         crystal_waters_pdb=crystal_waters_pdb,
     )
-
-    cache_file = work_dir / "complex.pickle"
-    with contextlib.suppress(Exception):
-        cache_file.write_bytes(pickle.dumps(complex))
 
     return complex

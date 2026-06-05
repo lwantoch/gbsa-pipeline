@@ -6,12 +6,16 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import gemmi
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
+
+if TYPE_CHECKING:
+    import parmed as pmd
+    from openmm.app import ForceField
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +184,8 @@ class ParametrisedComplex:
     gro_file: Path
     top_file: Path
     config: ParametrizationConfig
-    forcefield: Any = field(default=None, hash=False, compare=False, repr=False)
-    parmed_structure: Any = field(default=None, hash=False, compare=False, repr=False)
+    forcefield: ForceField | None = field(default=None, hash=False, compare=False, repr=False)
+    parmed_structure: pmd.Structure | None = field(default=None, hash=False, compare=False, repr=False)
     crystal_waters_pdb: Path | None = None
 
 
