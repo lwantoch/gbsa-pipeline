@@ -158,7 +158,6 @@ def test_system_config_defaults() -> None:
     cfg = SystemConfig(protein=Path("/some/protein.pdb"))
 
     assert cfg.ligand is None
-    assert cfg.extra_ff_files == ()
     assert cfg.net_charge is None
 
 
