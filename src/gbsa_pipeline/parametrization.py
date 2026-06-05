@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Union
 
 import BioSimSpace as BSS
+import gemmi
 import parmed as pmd
 from openff.toolkit.topology import Molecule
 from openmm.app import ForceField, Modeller, NoCutoff
@@ -31,9 +32,6 @@ PathLike = Union[str, Path]
 
 logger = logging.getLogger(__name__)
 
-PDB_ELEMENT_START = 76
-PDB_ELEMENT_END = 78
-PDB_ATOM_NAME_WIDTH = 4
 THREE_CHAR_ATOM_NAME_LENGTH = 3
 MIN_GREEK_ATOM_NAME_LENGTH = 2
 MIN_PDBQT_ATOM_FIELDS = 9
@@ -111,16 +109,15 @@ _WATER_RESIDUE_NAMES_SET = {"HOH", "WAT", "TIP3", "TIP3P", "SOL"}
 
 def _pdb_sidechain_names_by_depth(protein_pdb: Path, resname: str) -> dict[tuple[str, int], list[str]]:
     """Return a mapping (element, depth_from_CA) → [atom_names] for a residue in the PDB."""
+    st = gemmi.read_pdb(str(protein_pdb))
     pdb_atoms: list[tuple[str, str]] = []
-    for line in protein_pdb.read_text().splitlines():
-        if not line.startswith(("ATOM", "HETATM")):
-            continue
-        rname = line[17:20].strip()
-        if rname != resname:
-            continue
-        aname = line[12:16].strip()
-        element = line[PDB_ELEMENT_START:PDB_ELEMENT_END].strip() if len(line) >= PDB_ELEMENT_END else aname[:1]
-        pdb_atoms.append((aname, element))
+    for model in st:
+        for chain in model:
+            for residue in chain:
+                if residue.name.upper() != resname:
+                    continue
+                for atom in residue:
+                    pdb_atoms.append((atom.name, atom.element.name))
 
     backbone_names = {
         "N",
@@ -617,15 +614,13 @@ def _write_dry_protein_pdb(protein_pdb: Path, output_pdb: Path) -> Path:
     exact behaviour tleap requires to recognise the C-terminal residue and apply
     the CLYS/CXXX template; without TER, saveAmberParm fails on the OXT atom.
     """
-    import gemmi  # noqa: PLC0415
-
     amber_renames: dict[tuple[str, str], str] = {
         ("OC1", ""): "O",
         ("OC2", ""): "OXT",
         ("CD", "ILE"): "CD1",
     }
 
-    st = gemmi.read_pdb_string(protein_pdb.read_text(encoding="utf-8", errors="replace"))
+    st = gemmi.read_pdb(str(protein_pdb))
 
     for model in st:
         for chain in model:
@@ -1202,18 +1197,7 @@ def _parametrize_tleap(inp: ParametrizationInput) -> ParametrisedComplex:
     # ATOM residue (e.g. ZN at PDB 400 → tleap index 192 when last ATOM is 191).
     # Remap any such residue numbers in the MCPB.py bond commands.
     if bond_commands:
-        _atom_resnums: set[int] = set()
-        _hetatm_resnums: set[int] = set()
-        for _line in dry_pdb.read_text().splitlines():
-            _rec = _line[:6].strip().upper()
-            try:
-                _rn = int(_line[22:26])
-            except (ValueError, IndexError):
-                continue
-            if _rec == "ATOM":
-                _atom_resnums.add(_rn)
-            elif _rec == "HETATM":
-                _hetatm_resnums.add(_rn)
+        _atom_resnums, _hetatm_resnums = _collect_pdb_resnums(dry_pdb)
         _hetatm_map: dict[int, int] = {}
         if _atom_resnums and _hetatm_resnums:
             _max_atom = max(_atom_resnums)
@@ -1323,41 +1307,39 @@ _GAFF_FF_VERSION: dict[LigandFF, str] = {
     LigandFF.GAFF2: "gaff-2.11",
 }
 
-_WATER_RESIDUE_NAMES = {"HOH", "WAT", "TIP3", "TIP3P", "SOL"}
-_PDB_COORDINATE_RECORD_PREFIXES = ("ATOM  ", "HETATM")
-_PDB_RESIDUE_NAME_START = 17
-_PDB_RESIDUE_NAME_END = 20
 
+def _collect_pdb_resnums(pdb: Path) -> tuple[set[int], set[int]]:
+    """Return (atom_resnums, hetatm_resnums) from a PDB file.
 
-def _is_crystal_water_pdb_record(line: str) -> bool:
-    """Return whether a PDB coordinate record describes crystallographic water.
-
-    The parametrization stage intentionally builds only the dry protein-ligand
-    system because explicit solvent is added later by the solvation stage. This
-    helper only inspects fixed-width PDB coordinate records, so it does not try
-    to parse mmCIF or arbitrary whitespace-delimited text. It keeps water
-    filtering close to PDB text handling instead of hiding it inside force-field
-    setup. Non-coordinate records always return ``False`` so headers,
-    connectivity records, and metadata do not leak into the extracted water file.
+    Used to detect residue-number gaps between ATOM and HETATM chains so tleap
+    bond commands referencing HETATM residue numbers can be remapped to tleap's
+    sequential numbering scheme.
     """
-    if not line.startswith(_PDB_COORDINATE_RECORD_PREFIXES):
-        return False
-
-    residue_name = line[_PDB_RESIDUE_NAME_START:_PDB_RESIDUE_NAME_END].strip().upper()
-    return residue_name in _WATER_RESIDUE_NAMES
+    st = gemmi.read_pdb(str(pdb))
+    atom_resnums: set[int] = set()
+    hetatm_resnums: set[int] = set()
+    for model in st:
+        for chain in model:
+            for residue in chain:
+                rn = residue.seqid.num
+                if rn is None:
+                    continue
+                if residue.het_flag == "A":
+                    atom_resnums.add(rn)
+                elif residue.het_flag == "H":
+                    hetatm_resnums.add(rn)
+    return atom_resnums, hetatm_resnums
 
 
 def _write_crystal_waters_pdb(protein_pdb: Path, output_pdb: Path) -> Path | None:
-    """Write crystallographic water coordinate records to a separate PDB file.
+    """Write crystallographic water residues to a separate PDB file.
 
     The generated file is an inspection and preservation artefact; it is not
     part of the dry OpenMM protein-ligand parametrization path. The solvation
     step can later restore these waters before adding bulk solvent, so the
     freshly placed solvent is generated around the retained crystallographic
-    waters instead of ignoring them. Only coordinate records with common water
-    residue names are written, which avoids copying protein, ligand, metal, or
-    header records into the water-only file. ``None`` is returned when no water
-    records are present, and an old generated file is removed to avoid stale
+    waters instead of ignoring them. ``None`` is returned when no water
+    residues are present, and an old generated file is removed to avoid stale
     artefacts in persistent integration-test folders.
 
     Clash filtering (removing waters that overlap with protein/ligand heavy atoms)
@@ -1365,17 +1347,23 @@ def _write_crystal_waters_pdb(protein_pdb: Path, output_pdb: Path) -> Path | Non
     (``_restore_crystal_waters_before_solvation`` in ``solvation_openmm.py``),
     which uses OpenMM topology to do the check correctly.
     """
-    water_lines = [
-        line for line in protein_pdb.read_text(encoding="utf-8").splitlines() if _is_crystal_water_pdb_record(line)
-    ]
+    st = gemmi.read_pdb(str(protein_pdb))
+    water_found = False
+    for model in st:
+        for chain in model:
+            to_remove = [i for i, res in enumerate(chain) if res.name.upper() not in _WATER_RESIDUE_NAMES_SET]
+            for i in reversed(to_remove):
+                del chain[i]
+            if len(chain) > 0:
+                water_found = True
 
-    if not water_lines:
+    if not water_found:
         with contextlib.suppress(FileNotFoundError):
             output_pdb.unlink()
         return None
 
     output_pdb.parent.mkdir(parents=True, exist_ok=True)
-    output_pdb.write_text("\n".join(water_lines) + "\nEND\n", encoding="utf-8")
+    st.write_pdb(str(output_pdb))
     return output_pdb
 
 
@@ -1416,7 +1404,7 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
         logger.debug("Crystal waters written → %s.", crystal_waters_pdb)
 
     protein_modeller = _load_pdb_as_modeller(inp.protein_pdb)
-    n_removed = _delete_residues_by_name(protein_modeller, _WATER_RESIDUE_NAMES)
+    n_removed = _delete_residues_by_name(protein_modeller, _WATER_RESIDUE_NAMES_SET)
     if n_removed:
         logger.debug("Removed %d crystallographic water residue(s) from protein topology.", n_removed)
     logger.debug("Protein PDB loaded without crystal waters (%d atoms).", protein_modeller.topology.getNumAtoms())

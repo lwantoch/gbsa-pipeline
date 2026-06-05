@@ -15,6 +15,7 @@ from gbsa_pipeline.docking import DockingBox, VinaEngine, prepare_ligand_with_me
 
 if TYPE_CHECKING:
     from pathlib import Path
+from gbsa_pipeline.docking._receptor_prep import _strip_hetatm, merge_pdb_structures
 
 
 def test_meeko_smiles_to_pdbqt(tmp_path: Path) -> None:
@@ -87,3 +88,97 @@ def test_vina_build_command(tmp_path: Path) -> None:
     assert "3" in cmd
     assert "--energy_range" in cmd
     assert "4.5" in cmd
+
+
+# ---------------------------------------------------------------------------
+# _strip_hetatm tests
+# ---------------------------------------------------------------------------
+
+_MIXED_PDB = """\
+ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00  0.00           N
+ATOM      2  CA  ALA A   1       2.000   2.000   3.000  1.00  0.00           C
+HETATM    3  ZN  ZN  A 100       5.000   5.000   5.000  1.00  0.00          ZN
+HETATM    4  O   HOH B   1      10.000  10.000  10.000  1.00  0.00           O
+END
+"""
+
+_ATOM_ONLY_PDB = """\
+ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00  0.00           N
+ATOM      2  CA  ALA A   1       2.000   2.000   3.000  1.00  0.00           C
+END
+"""
+
+
+def test_strip_hetatm_removes_hetatm_records(tmp_path: Path) -> None:
+    """HETATM records (metals, waters) are removed; ATOM records are preserved."""
+    src = tmp_path / "receptor.pdb"
+    dest = tmp_path / "stripped.pdb"
+    src.write_text(_MIXED_PDB, encoding="utf-8")
+
+    result = _strip_hetatm(src, dest)
+
+    assert result == dest
+    assert dest.exists()
+    content = dest.read_text(encoding="utf-8")
+    assert "HETATM" not in content
+    assert content.count("ATOM") >= 2
+
+
+def test_strip_hetatm_no_hetatm_is_unchanged(tmp_path: Path) -> None:
+    """A PDB with no HETATM records is written unchanged (ATOM records preserved)."""
+    src = tmp_path / "receptor.pdb"
+    dest = tmp_path / "stripped.pdb"
+    src.write_text(_ATOM_ONLY_PDB, encoding="utf-8")
+
+    _strip_hetatm(src, dest)
+
+    content = dest.read_text(encoding="utf-8")
+    assert content.count("ATOM") == 2
+    assert "HETATM" not in content
+
+
+# ---------------------------------------------------------------------------
+# merge_pdb_structures tests
+# ---------------------------------------------------------------------------
+
+_PROTEIN_PDB = """\
+ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00  0.00           N
+ATOM      2  CA  ALA A   1       2.000   2.000   3.000  1.00  0.00           C
+END
+"""
+
+_WATERS_PDB = """\
+HETATM    1  O   HOH W   1      10.000  10.000  10.000  1.00  0.00           O
+HETATM    2  O   HOH W   2      11.000  11.000  11.000  1.00  0.00           O
+END
+"""
+
+
+def test_merge_pdb_structures_merges_both(tmp_path: Path) -> None:
+    """Merged PDB contains records from both input files."""
+    protein = tmp_path / "protein.pdb"
+    waters = tmp_path / "waters.pdb"
+    out = tmp_path / "merged.pdb"
+    protein.write_text(_PROTEIN_PDB, encoding="utf-8")
+    waters.write_text(_WATERS_PDB, encoding="utf-8")
+
+    result = merge_pdb_structures(protein, waters, out)
+
+    assert result == out
+    assert out.exists()
+    content = out.read_text(encoding="utf-8")
+    assert content.count("ALA") >= 1
+    assert content.count("HOH") >= 2
+
+
+def test_merge_pdb_structures_creates_parent(tmp_path: Path) -> None:
+    """Output parent directory is created if it does not exist."""
+    protein = tmp_path / "protein.pdb"
+    waters = tmp_path / "waters.pdb"
+    out = tmp_path / "subdir" / "merged.pdb"
+    protein.write_text(_PROTEIN_PDB, encoding="utf-8")
+    waters.write_text(_WATERS_PDB, encoding="utf-8")
+
+    merge_pdb_structures(protein, waters, out)
+
+    assert out.exists()

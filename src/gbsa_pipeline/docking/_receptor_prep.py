@@ -6,6 +6,7 @@ import logging
 import re
 from pathlib import Path
 
+import gemmi
 from rdkit import Chem
 
 from gbsa_pipeline.docking._utils import _require_file
@@ -21,9 +22,13 @@ def _strip_hetatm(receptor_pdb: Path, dest: Path) -> Path:
     residue cause ``each residue key must have exactly 1 resname`` errors.
     Docking receptors should only contain protein atoms anyway.
     """
-    lines = receptor_pdb.read_text(encoding="utf-8").splitlines(keepends=True)
-    kept = [line for line in lines if not line.startswith("HETATM")]
-    dest.write_text("".join(kept), encoding="utf-8")
+    st = gemmi.read_pdb(str(receptor_pdb))
+    for model in st:
+        for chain in model:
+            to_remove = [i for i, res in enumerate(chain) if res.het_flag == "H"]
+            for i in reversed(to_remove):
+                del chain[i]
+    st.write_pdb(str(dest))
     return dest
 
 
@@ -167,22 +172,16 @@ def convert_receptor_pdb_to_pdbqt(
     return output_path
 
 
-def prepare_receptor_with_crystal_waters(
-    receptor_pdb: Path,
-    crystal_waters_pdb: Path,
-    output_pdb: Path,
-) -> Path:
-    """Merge selected crystal waters into a receptor PDB for docking.
+def merge_pdb_structures(base_pdb: Path, extra_pdb: Path, output_pdb: Path) -> Path:
+    """Merge two PDB files by appending all chains from extra_pdb into base_pdb.
 
-    Waters are appended after the protein records so Meeko and Vina treat them
-    as part of the rigid receptor.
+    Chain names that conflict with base_pdb are automatically renamed. The
+    merged structure is written to output_pdb.
     """
-    protein_lines = [
-        line for line in receptor_pdb.read_text(encoding="utf-8").splitlines() if not line.startswith(("TER", "END"))
-    ]
-    water_lines = [
-        line for line in crystal_waters_pdb.read_text(encoding="utf-8").splitlines() if not line.startswith("END")
-    ]
+    base_st = gemmi.read_pdb(str(base_pdb))
+    extra_st = gemmi.read_pdb(str(extra_pdb))
+    for chain in extra_st[0]:
+        base_st[0].add_chain(chain, unique_name=True)
     output_pdb.parent.mkdir(parents=True, exist_ok=True)
-    output_pdb.write_text("\n".join(protein_lines + water_lines) + "\nEND\n", encoding="utf-8")
+    base_st.write_pdb(str(output_pdb))
     return output_pdb

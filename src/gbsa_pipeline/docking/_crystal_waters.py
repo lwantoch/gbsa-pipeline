@@ -11,7 +11,7 @@ from rdkit import Chem
 from scipy.spatial import cKDTree
 
 from gbsa_pipeline.docking._models import DockingManifest, DockingValidation
-from gbsa_pipeline.docking._receptor_prep import prepare_receptor_with_crystal_waters
+from gbsa_pipeline.docking._receptor_prep import merge_pdb_structures
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -314,7 +314,7 @@ def dock_with_and_without_crystal_waters(
 
     # --- Run 2: receptor + selected crystal waters --------------------------
     receptor_with_waters = work_dir / "receptor_with_crystal_waters.pdb"
-    prepare_receptor_with_crystal_waters(request.receptor, selected_path, receptor_with_waters)
+    merge_pdb_structures(request.receptor, selected_path, receptor_with_waters)
 
     try:
         result_with_water = engine.dock(
