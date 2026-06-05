@@ -23,6 +23,8 @@ from gbsa_pipeline.docking._crystal_waters import (
     _iter_water_oxygens,
     _read_pdb_like,
     _write_chain_as_pdb,
+    select_docking_crystal_waters,
+    validate_docked_pose,
 )
 from gbsa_pipeline.docking._receptor_prep import _merge_sdfs_into_pdb, _strip_hetatm, merge_pdb_structures
 
@@ -427,3 +429,143 @@ def test_write_chain_as_pdb_contains_residue(tmp_path: Path) -> None:
     _write_chain_as_pdb(_make_water_chain(), out)
     content = out.read_text(encoding="utf-8")
     assert "HOH" in content
+
+
+# ---------------------------------------------------------------------------
+# select_docking_crystal_waters tests
+# ---------------------------------------------------------------------------
+
+_ONE_WATER_AT_10 = """\
+HETATM    1  O   HOH W   1      10.000  10.000  10.000  1.00  0.00           O
+END
+"""
+_TWO_WATERS_ONE_FAR = """\
+HETATM    1  O   HOH W   1      10.000  10.000  10.000  1.00  0.00           O
+HETATM    2  O   HOH W   2      20.000  20.000  20.000  1.00  0.00           O
+END
+"""
+_LIGAND_AT_10 = """\
+HETATM    1  C1  LIG L   1      10.000  10.000  10.000  1.00  0.00           C
+END
+"""
+_RECEPTOR_FAR = """\
+ATOM      1  CA  ALA A   1      50.000  50.000  50.000  1.00  0.00           C
+END
+"""
+_RECEPTOR_CLASH = """\
+ATOM      1  CA  ALA A   1      10.000  10.000  11.000  1.00  0.00           C
+END
+"""
+_BOX_AT_10 = DockingBox(center=(10.0, 10.0, 10.0), size=(6.0, 6.0, 6.0))
+
+
+def test_select_crystal_waters_missing_file_returns_none(tmp_path: Path) -> None:
+    """Missing crystal waters file returns (None, [])."""
+    path, ids = select_docking_crystal_waters(
+        tmp_path / "missing.pdb",
+        _BOX_AT_10,
+        tmp_path / "lig.pdb",
+        tmp_path / "rec.pdb",
+        tmp_path / "out.pdb",
+    )
+    assert path is None
+    assert ids == []
+
+
+def test_select_crystal_waters_retains_passing_water(tmp_path: Path) -> None:
+    """Water inside the box and near the ligand is retained."""
+    crystal = tmp_path / "waters.pdb"
+    ligand = tmp_path / "ligand.pdb"
+    receptor = tmp_path / "receptor.pdb"
+    out = tmp_path / "out.pdb"
+    crystal.write_text(_ONE_WATER_AT_10, encoding="utf-8")
+    ligand.write_text(_LIGAND_AT_10, encoding="utf-8")
+    receptor.write_text(_RECEPTOR_FAR, encoding="utf-8")
+
+    path, ids = select_docking_crystal_waters(crystal, _BOX_AT_10, ligand, receptor, out)
+
+    assert path == out
+    assert ids == ["1"]
+
+
+def test_select_crystal_waters_excludes_water_outside_box(tmp_path: Path) -> None:
+    """Water outside the docking box is rejected."""
+    crystal = tmp_path / "waters.pdb"
+    ligand = tmp_path / "ligand.pdb"
+    receptor = tmp_path / "receptor.pdb"
+    out = tmp_path / "out.pdb"
+    crystal.write_text(_TWO_WATERS_ONE_FAR, encoding="utf-8")
+    ligand.write_text(_LIGAND_AT_10, encoding="utf-8")
+    receptor.write_text(_RECEPTOR_FAR, encoding="utf-8")
+
+    _, ids = select_docking_crystal_waters(crystal, _BOX_AT_10, ligand, receptor, out)
+
+    assert "2" not in ids
+
+
+def test_select_crystal_waters_excludes_receptor_clash(tmp_path: Path) -> None:
+    """Water within receptor clash distance is rejected."""
+    crystal = tmp_path / "waters.pdb"
+    ligand = tmp_path / "ligand.pdb"
+    receptor = tmp_path / "receptor.pdb"
+    out = tmp_path / "out.pdb"
+    crystal.write_text(_ONE_WATER_AT_10, encoding="utf-8")
+    ligand.write_text(_LIGAND_AT_10, encoding="utf-8")
+    receptor.write_text(_RECEPTOR_CLASH, encoding="utf-8")
+
+    path, ids = select_docking_crystal_waters(
+        crystal,
+        _BOX_AT_10,
+        ligand,
+        receptor,
+        out,
+        receptor_clash_cutoff_angstrom=2.2,
+    )
+
+    assert path is None
+    assert ids == []
+
+
+# ---------------------------------------------------------------------------
+# validate_docked_pose tests
+# ---------------------------------------------------------------------------
+
+_POSE_AT_50 = """\
+HETATM    1  C1  LIG L   1      50.000  50.000  50.000  1.00  0.00           C
+END
+"""
+_POSE_AT_10 = """\
+HETATM    1  C1  LIG L   1      10.000  10.000  10.000  1.00  0.00           C
+END
+"""
+_RECEPTOR_AT_10 = """\
+ATOM      1  CA  ALA A   1      10.000  10.000  10.000  1.00  0.00           C
+END
+"""
+
+
+def test_validate_docked_pose_no_clashes(tmp_path: Path) -> None:
+    """Ligand far from receptor produces no clashes."""
+    pose = tmp_path / "pose.pdb"
+    receptor = tmp_path / "receptor.pdb"
+    pose.write_text(_POSE_AT_50, encoding="utf-8")
+    receptor.write_text(_RECEPTOR_AT_10, encoding="utf-8")
+
+    result = validate_docked_pose(pose, receptor)
+
+    assert result.ligand_protein_clashes == []
+
+
+def test_validate_docked_pose_detects_clash(tmp_path: Path) -> None:
+    """Ligand atom coinciding with a receptor atom is flagged as a clash."""
+    pose = tmp_path / "pose.pdb"
+    receptor = tmp_path / "receptor.pdb"
+    pose.write_text(_POSE_AT_10, encoding="utf-8")
+    receptor.write_text(_RECEPTOR_AT_10, encoding="utf-8")
+
+    result = validate_docked_pose(pose, receptor, clash_cutoff_angstrom=2.0)
+
+    assert len(result.ligand_protein_clashes) >= 1
+    label, dist = result.ligand_protein_clashes[0]
+    assert "lig_atom" in label
+    assert dist < 0.01
