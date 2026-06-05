@@ -19,6 +19,8 @@ from rdkit.Chem import AllChem
 
 from gbsa_pipeline.docking import DockingBox, VinaEngine, prepare_ligand_with_meeko
 from gbsa_pipeline.docking._crystal_waters import (
+    _detect_clashes,
+    _find_water_bridges,
     _in_docking_box,
     _iter_water_oxygens,
     _read_pdb_like,
@@ -569,3 +571,89 @@ def test_validate_docked_pose_detects_clash(tmp_path: Path) -> None:
     label, dist = result.ligand_protein_clashes[0]
     assert "lig_atom" in label
     assert dist < 0.01
+
+
+# ---------------------------------------------------------------------------
+# _detect_clashes tests
+# ---------------------------------------------------------------------------
+
+
+def test_detect_clashes_no_clash() -> None:
+    """Atoms far apart produce no clashes."""
+    lig = np.array([[0.0, 0.0, 0.0]])
+    rec = np.array([[10.0, 10.0, 10.0]])
+    lp, lw, wp = _detect_clashes(lig, rec, [], cutoff=2.0)
+    assert lp == []
+    assert lw == []
+    assert wp == []
+
+
+def test_detect_clashes_lig_protein() -> None:
+    """Ligand atom within cutoff of receptor atom is flagged."""
+    lig = np.array([[0.0, 0.0, 0.0]])
+    rec = np.array([[0.5, 0.0, 0.0]])
+    lp, _, _ = _detect_clashes(lig, rec, [], cutoff=2.0)
+    assert len(lp) == 1
+    assert "lig_atom0" in lp[0][0]
+    assert "rec_atom0" in lp[0][0]
+    assert abs(lp[0][1] - 0.5) < 1e-6
+
+
+def test_detect_clashes_water_protein() -> None:
+    """Water oxygen within cutoff of receptor is flagged as water-protein clash."""
+    lig = np.array([[50.0, 0.0, 0.0]])
+    rec = np.array([[0.5, 0.0, 0.0]])
+    water = [("1", np.array([0.0, 0.0, 0.0]))]
+    _, _, wp = _detect_clashes(lig, rec, water, cutoff=2.0)
+    assert len(wp) == 1
+    assert "HOH1" in wp[0][0]
+
+
+def test_detect_clashes_water_ligand() -> None:
+    """Water oxygen within cutoff of ligand is flagged as water-ligand clash."""
+    lig = np.array([[0.5, 0.0, 0.0]])
+    rec = np.array([[50.0, 0.0, 0.0]])
+    water = [("2", np.array([0.0, 0.0, 0.0]))]
+    _, lw, _ = _detect_clashes(lig, rec, water, cutoff=2.0)
+    assert len(lw) == 1
+    assert "HOH2" in lw[0][0]
+
+
+# ---------------------------------------------------------------------------
+# _find_water_bridges tests
+# ---------------------------------------------------------------------------
+
+
+def test_find_water_bridges_detects_bridge() -> None:
+    """Water equidistant between ligand and receptor in bridge range is a bridge."""
+    lig = np.array([[3.0, 0.0, 0.0]])
+    rec = np.array([[-3.0, 0.0, 0.0]])
+    water = [("1", np.array([0.0, 0.0, 0.0]))]
+    bridges = _find_water_bridges(water, lig, rec, min_angstrom=2.6, max_angstrom=3.2)
+    assert len(bridges) == 1
+    assert bridges[0][0] == "HOH1"
+
+
+def test_find_water_bridges_too_close_to_ligand() -> None:
+    """Water closer than bridge_min to ligand is not a bridge."""
+    lig = np.array([[1.0, 0.0, 0.0]])
+    rec = np.array([[-3.0, 0.0, 0.0]])
+    water = [("1", np.array([0.0, 0.0, 0.0]))]
+    bridges = _find_water_bridges(water, lig, rec, min_angstrom=2.6, max_angstrom=3.2)
+    assert bridges == []
+
+
+def test_find_water_bridges_too_far_from_receptor() -> None:
+    """Water farther than bridge_max from receptor is not a bridge."""
+    lig = np.array([[3.0, 0.0, 0.0]])
+    rec = np.array([[-10.0, 0.0, 0.0]])
+    water = [("1", np.array([0.0, 0.0, 0.0]))]
+    bridges = _find_water_bridges(water, lig, rec, min_angstrom=2.6, max_angstrom=3.2)
+    assert bridges == []
+
+
+def test_find_water_bridges_empty_water_list() -> None:
+    """No waters yields no bridges."""
+    lig = np.array([[3.0, 0.0, 0.0]])
+    rec = np.array([[-3.0, 0.0, 0.0]])
+    assert _find_water_bridges([], lig, rec, min_angstrom=2.6, max_angstrom=3.2) == []

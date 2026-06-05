@@ -192,6 +192,66 @@ def select_docking_crystal_waters(
     return output_pdb, retained_ids
 
 
+def _detect_clashes(
+    lig_coords: np.ndarray,
+    rec_coords: np.ndarray,
+    water_oxygens: list[tuple[str, np.ndarray]],
+    *,
+    cutoff: float,
+) -> tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]:
+    """Return ``(lig_protein_clashes, lig_water_clashes, water_protein_clashes)``.
+
+    Each entry is a ``(label, distance_Å)`` pair for atom pairs within ``cutoff``.
+    """
+    lig_protein: list[tuple[str, float]] = []
+    lig_water: list[tuple[str, float]] = []
+    water_protein: list[tuple[str, float]] = []
+
+    if lig_coords.size > 0 and rec_coords.size > 0:
+        dists = np.linalg.norm(lig_coords[:, None] - rec_coords[None, :], axis=-1)
+        for i, j in np.argwhere(dists <= cutoff):
+            lig_protein.append((f"lig_atom{i}<->rec_atom{j}", float(dists[i, j])))
+
+    for res_id, ow in water_oxygens:
+        rec_dists = np.linalg.norm(rec_coords - ow, axis=1) if rec_coords.size > 0 else np.empty(0)
+        lig_dists = np.linalg.norm(lig_coords - ow, axis=1) if lig_coords.size > 0 else np.empty(0)
+        for j in np.where(rec_dists <= cutoff)[0]:
+            water_protein.append((f"HOH{res_id}<->rec_atom{j}", float(rec_dists[j])))
+        for i in np.where(lig_dists <= cutoff)[0]:
+            lig_water.append((f"HOH{res_id}<->lig_atom{i}", float(lig_dists[i])))
+
+    return lig_protein, lig_water, water_protein
+
+
+def _find_water_bridges(
+    water_oxygens: list[tuple[str, np.ndarray]],
+    lig_coords: np.ndarray,
+    rec_coords: np.ndarray,
+    *,
+    min_angstrom: float,
+    max_angstrom: float,
+) -> list[tuple[str, str, str, float, float]]:
+    """Return ``(water_id, lig_label, rec_label, d_lig, d_rec)`` for each bridge.
+
+    A bridge is a water oxygen within ``[min, max]`` Å of both a ligand and a
+    receptor heavy atom simultaneously.
+    """
+    bridges: list[tuple[str, str, str, float, float]] = []
+    if not water_oxygens or lig_coords.size == 0 or rec_coords.size == 0:
+        return bridges
+    for res_id, ow in water_oxygens:
+        lig_dists = np.linalg.norm(lig_coords - ow, axis=1)
+        rec_dists = np.linalg.norm(rec_coords - ow, axis=1)
+        lig_near = np.where((lig_dists >= min_angstrom) & (lig_dists <= max_angstrom))[0]
+        rec_near = np.where((rec_dists >= min_angstrom) & (rec_dists <= max_angstrom))[0]
+        for i in lig_near:
+            for j in rec_near:
+                bridges.append(
+                    (f"HOH{res_id}", f"lig_atom{i}", f"rec_atom{j}", float(lig_dists[i]), float(rec_dists[j]))
+                )
+    return bridges
+
+
 def validate_docked_pose(
     pose_sdf: Path,
     receptor_pdb: Path,
@@ -201,47 +261,27 @@ def validate_docked_pose(
     bridge_min_angstrom: float = 2.6,
     bridge_max_angstrom: float = 3.2,
 ) -> DockingValidation:
-    """Check clashes and water bridges for a docked pose.
-
-    A "water bridge" is a crystal water whose oxygen is within
-    ``[bridge_min, bridge_max]`` Å of both a ligand heavy atom and a receptor
-    heavy atom simultaneously.
-    """
+    """Check clashes and water bridges for a docked pose."""
     lig_coords = _pose_heavy_atom_coords(pose_sdf)
     rec_coords = _pdb_heavy_atom_coords(receptor_pdb)
-
-    lig_protein_clashes: list[tuple[str, float]] = []
-    lig_water_clashes: list[tuple[str, float]] = []
-    water_protein_clashes: list[tuple[str, float]] = []
-    water_bridges: list[tuple[str, str, str, float, float]] = []
-
-    if lig_coords.size > 0 and rec_coords.size > 0:
-        dists = np.linalg.norm(lig_coords[:, None] - rec_coords[None, :], axis=-1)
-        for i, j in np.argwhere(dists <= clash_cutoff_angstrom):
-            lig_protein_clashes.append((f"lig_atom{i}<->rec_atom{j}", float(dists[i, j])))
-
-    if retained_waters_pdb is not None and retained_waters_pdb.exists():
-        for res_id, ow in _iter_water_oxygens(retained_waters_pdb):
-            lig_dists = np.linalg.norm(lig_coords - ow, axis=1) if lig_coords.size > 0 else np.empty(0)
-            rec_dists = np.linalg.norm(rec_coords - ow, axis=1) if rec_coords.size > 0 else np.empty(0)
-            for j in np.where(rec_dists <= clash_cutoff_angstrom)[0]:
-                water_protein_clashes.append((f"HOH{res_id}<->rec_atom{j}", float(rec_dists[j])))
-            for i in np.where(lig_dists <= clash_cutoff_angstrom)[0]:
-                lig_water_clashes.append((f"HOH{res_id}<->lig_atom{i}", float(lig_dists[i])))
-            lig_bridge = np.where((lig_dists >= bridge_min_angstrom) & (lig_dists <= bridge_max_angstrom))[0]
-            rec_bridge = np.where((rec_dists >= bridge_min_angstrom) & (rec_dists <= bridge_max_angstrom))[0]
-            for i in lig_bridge:
-                for j in rec_bridge:
-                    water_bridges.append(
-                        (
-                            f"HOH{res_id}",
-                            f"lig_atom{i}",
-                            f"rec_atom{j}",
-                            float(lig_dists[i]),
-                            float(rec_dists[j]),
-                        )
-                    )
-
+    water_oxygens = (
+        list(_iter_water_oxygens(retained_waters_pdb))
+        if retained_waters_pdb is not None and retained_waters_pdb.exists()
+        else []
+    )
+    lig_protein_clashes, lig_water_clashes, water_protein_clashes = _detect_clashes(
+        lig_coords,
+        rec_coords,
+        water_oxygens,
+        cutoff=clash_cutoff_angstrom,
+    )
+    water_bridges = _find_water_bridges(
+        water_oxygens,
+        lig_coords,
+        rec_coords,
+        min_angstrom=bridge_min_angstrom,
+        max_angstrom=bridge_max_angstrom,
+    )
     return DockingValidation(
         ligand_protein_clashes=lig_protein_clashes,
         ligand_water_clashes=lig_water_clashes,
