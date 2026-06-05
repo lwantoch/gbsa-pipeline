@@ -87,7 +87,7 @@ def test_from_toml_full(tmp_path: Path) -> None:
 
         [solvation]
         water_model = "tip4p"
-        box_shape   = "cubic"
+        shape       = "cubic"
         box_size    = 10.0
 
         [minimization]
@@ -113,7 +113,7 @@ def test_from_toml_full(tmp_path: Path) -> None:
     assert cfg.forcefield.ligand_ff == LigandFF.GAFF
     assert cfg.forcefield.charge_method == ChargeMethod.NAGL
     assert cfg.solvation.water_model == WaterModel.TIP4P
-    assert cfg.solvation.box_shape == BoxShape.CUBIC
+    assert cfg.solvation.shape == BoxShape.CUBIC
     assert cfg.solvation.box_size == 10.0
     assert cfg.minimization.nsteps == 5000
     assert cfg.minimization.emtol == 5.0
@@ -175,7 +175,7 @@ def test_solvation_config_defaults() -> None:
     cfg = SolvationConfig()
 
     assert cfg.water_model == WaterModel.TIP3P
-    assert cfg.box_shape == BoxShape.TRUNCATED_OCTAHEDRON
+    assert cfg.shape == BoxShape.TRUNCATED_OCTAHEDRON
     assert cfg.box_size == 8.0
     assert cfg.padding is None
     assert cfg.ion_concentration == 0.15

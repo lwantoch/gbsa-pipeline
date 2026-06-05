@@ -77,9 +77,9 @@ def _stage_solvate(
     sol = config.solvation
     box_desc = f"padding={sol.padding} nm" if sol.padding is not None else f"box_size={sol.box_size} nm"
     logger.info(
-        "  water_model=%s  box_shape=%s  %s  ion_conc=%s mol/L",
+        "  water_model=%s  shape=%s  %s  ion_conc=%s mol/L",
         sol.water_model,
-        sol.box_shape,
+        sol.shape,
         box_desc,
         sol.ion_concentration,
     )
@@ -257,14 +257,7 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
 
 def _to_solvation_params(cfg: SolvationConfig) -> SolvationParams:
     """Map a :class:`~gbsa_pipeline.config.SolvationConfig` to a :class:`~gbsa_pipeline.solvation_box.SolvationParams`."""
-    return SolvationParams(
-        water_model=cfg.water_model,
-        shape=cfg.box_shape,
-        padding=cfg.padding,
-        box_size=cfg.box_size,
-        ion_concentration=cfg.ion_concentration,
-        neutralize=cfg.neutralize,
-    )
+    return SolvationParams(**cfg.model_dump())
 
 
 def _log_config(config: RunConfig, output_dir: Path) -> None:

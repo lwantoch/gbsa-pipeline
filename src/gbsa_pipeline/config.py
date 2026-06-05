@@ -31,7 +31,7 @@ class SolvationConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     water_model: WaterModel = WaterModel.TIP3P
-    box_shape: BoxShape = BoxShape.TRUNCATED_OCTAHEDRON
+    shape: BoxShape = BoxShape.TRUNCATED_OCTAHEDRON
     padding: float | None = None
     box_size: float | None = 8.0
     ion_concentration: float = 0.15
