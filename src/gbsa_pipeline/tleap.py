@@ -13,10 +13,10 @@ from pathlib import Path
 import gemmi
 import parmed as pmd
 
+from gbsa_pipeline._constants import WATER_RESIDUE_NAMES
 from gbsa_pipeline.mol2_utils import _strip_mol2_or_original
 from gbsa_pipeline.parametrization_enum import LigandFF, ProteinFF
 from gbsa_pipeline.parametrization_models import (
-    _WATER_RESIDUE_NAMES_SET,
     ParametrisedComplex,
     ParametrizationInput,
     _write_crystal_waters_pdb,
@@ -98,7 +98,7 @@ def _write_dry_protein_pdb(protein_pdb: Path, output_pdb: Path) -> Path:
         for chain in model:
             res_indices_to_remove: list[int] = []
             for ri, residue in enumerate(chain):
-                if residue.name.upper() in _WATER_RESIDUE_NAMES_SET:
+                if residue.name.upper() in WATER_RESIDUE_NAMES:
                     res_indices_to_remove.append(ri)
                     continue
                 resname = residue.name.upper()

@@ -43,6 +43,7 @@ from openmm import Vec3
 from openmm import unit as mm_unit
 from openmm.app import ForceField, Modeller, NoCutoff
 
+from gbsa_pipeline._constants import WATER_RESIDUE_NAMES
 from gbsa_pipeline._gro_io import _parse_gro
 from gbsa_pipeline._openmm_utils import (
     _heavy_atom_coords,
@@ -180,7 +181,7 @@ def solvate_openmm(
     )
 
 
-_WATER_RESIDUES: frozenset[str] = frozenset({"HOH", "WAT", "SOL"})
+_WATER_RESIDUES = WATER_RESIDUE_NAMES
 
 _WATER_RELAX_MDP = """\
 integrator          = steep

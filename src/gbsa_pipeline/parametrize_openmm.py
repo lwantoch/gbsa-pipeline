@@ -12,10 +12,10 @@ from openff.toolkit.topology import Molecule
 from openmm.app import ForceField, Modeller, NoCutoff
 from openmmforcefields.generators import GAFFTemplateGenerator
 
+from gbsa_pipeline._constants import WATER_RESIDUE_NAMES
 from gbsa_pipeline._openmm_utils import _delete_residues_by_name, _load_pdb_as_modeller
 from gbsa_pipeline.parametrization_enum import LigandFF, ProteinFF
 from gbsa_pipeline.parametrization_models import (
-    _WATER_RESIDUE_NAMES_SET,
     ParametrisedComplex,
     ParametrizationInput,
     _write_crystal_waters_pdb,
@@ -77,7 +77,7 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
         logger.debug("Crystal waters written → %s.", crystal_waters_pdb)
 
     protein_modeller = _load_pdb_as_modeller(inp.protein_pdb)
-    n_removed = _delete_residues_by_name(protein_modeller, _WATER_RESIDUE_NAMES_SET)
+    n_removed = _delete_residues_by_name(protein_modeller, WATER_RESIDUE_NAMES)
     if n_removed:
         logger.debug(
             "Removed %d crystallographic water residue(s) from protein topology.",

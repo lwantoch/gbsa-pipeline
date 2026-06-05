@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import gemmi
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from gbsa_pipeline._constants import WATER_RESIDUE_NAMES
 from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
 
 if TYPE_CHECKING:
@@ -18,8 +19,6 @@ if TYPE_CHECKING:
     from openmm.app import ForceField
 
 logger = logging.getLogger(__name__)
-
-_WATER_RESIDUE_NAMES_SET: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL"})
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +213,7 @@ def _write_crystal_waters_pdb(protein_pdb: Path, output_pdb: Path) -> Path | Non
     water_found = False
     for model in st:
         for chain in model:
-            to_remove = [i for i, res in enumerate(chain) if res.name.upper() not in _WATER_RESIDUE_NAMES_SET]
+            to_remove = [i for i, res in enumerate(chain) if res.name.upper() not in WATER_RESIDUE_NAMES]
             for i in reversed(to_remove):
                 del chain[i]
             if len(chain) > 0:

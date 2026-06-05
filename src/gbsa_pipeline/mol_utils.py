@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdmolops, rdMolTransforms
 
-from gbsa_pipeline.docking._utils import _require_file
-
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from rdkit.Geometry.rdGeometry import Point3D
 
 
 def load_first_sdf_molecule(path: Path, *, remove_hs: bool = False) -> Chem.Mol:
     """Read the first valid molecule from an SDF file."""
-    path = _require_file(Path(path), "SDF file")
+    path = path.resolve()
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"SDF file not found: {path}")
 
     supplier = Chem.SDMolSupplier(str(path), removeHs=remove_hs)
     molecule = supplier[0]

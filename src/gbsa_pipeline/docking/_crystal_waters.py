@@ -9,6 +9,7 @@ import gemmi
 import numpy as np
 from rdkit import Chem
 
+from gbsa_pipeline._constants import WATER_RESIDUE_NAMES
 from gbsa_pipeline._spatial import contact_pairs
 from gbsa_pipeline.docking._models import DockingManifest, DockingValidation
 from gbsa_pipeline.docking._receptor_prep import merge_pdb_structures
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-_WATER_RESNAMES: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL"})
+_WATER_RESNAMES = WATER_RESIDUE_NAMES
 
 
 # ---------------------------------------------------------------------------
