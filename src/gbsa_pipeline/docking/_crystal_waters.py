@@ -53,6 +53,11 @@ def _atom_pos(atom: Any) -> np.ndarray:
     return np.array([atom.pos.x, atom.pos.y, atom.pos.z])
 
 
+def _first_heavy_atom(residue: Any) -> Any | None:
+    """Return the first non-hydrogen atom in a residue, or None if all are hydrogens."""
+    return next((a for a in residue if not a.is_hydrogen()), None)
+
+
 def _pdb_heavy_atom_coords(
     pdb_path: Path,
     *,
@@ -90,16 +95,15 @@ def _pose_heavy_atom_coords(pose_path: Path) -> np.ndarray:
 
 
 def _iter_water_oxygens(pdb_path: Path) -> Iterator[tuple[str, np.ndarray]]:
-    """Yield ``(res_id, oxygen_xyz)`` for each residue with at least one non-hydrogen atom."""
+    """Yield ``(res_id, xyz)`` of the first heavy atom for each residue in the PDB."""
     structure = _read_pdb_like(pdb_path)
     if not structure:
         return
     for chain in structure[0]:
         for residue in chain:
-            for atom in residue:
-                if not atom.is_hydrogen():
-                    yield str(residue.seqid.num), _atom_pos(atom)
-                    break
+            atom = _first_heavy_atom(residue)
+            if atom is not None:
+                yield str(residue.seqid.num), _atom_pos(atom)
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +166,9 @@ def select_docking_crystal_waters(
 
     for chain in structure[0]:
         for residue in chain:
-            ow = next((_atom_pos(a) for a in residue if not a.is_hydrogen()), None)
-            if ow is None:
+            if (_ha := _first_heavy_atom(residue)) is None:
                 continue
+            ow = _atom_pos(_ha)
             if not (cx - hx <= ow[0] <= cx + hx and cy - hy <= ow[1] <= cy + hy and cz - hz <= ow[2] <= cz + hz):
                 continue
             if lig_tree is not None and not lig_tree.query_ball_point(ow, r=ligand_cutoff_angstrom):
@@ -218,18 +222,31 @@ def validate_docked_pose(
     if lig_coords.size > 0 and rec_tree is not None:
         for i, lpos in enumerate(lig_coords):
             for j in rec_tree.query_ball_point(lpos, r=clash_cutoff_angstrom):
-                lig_protein_clashes.append((f"lig_atom{i}<->rec_atom{j}", float(np.linalg.norm(lpos - rec_coords[j]))))
+                lig_protein_clashes.append(
+                    (
+                        f"lig_atom{i}<->rec_atom{j}",
+                        float(np.linalg.norm(lpos - rec_coords[j])),
+                    )
+                )
 
     if retained_waters_pdb is not None and retained_waters_pdb.exists():
         for res_id, ow in _iter_water_oxygens(retained_waters_pdb):
             if rec_tree is not None:
                 for j in rec_tree.query_ball_point(ow, r=clash_cutoff_angstrom):
                     water_protein_clashes.append(
-                        (f"HOH{res_id}<->rec_atom{j}", float(np.linalg.norm(ow - rec_coords[j])))
+                        (
+                            f"HOH{res_id}<->rec_atom{j}",
+                            float(np.linalg.norm(ow - rec_coords[j])),
+                        )
                     )
             if lig_tree is not None:
                 for i in lig_tree.query_ball_point(ow, r=clash_cutoff_angstrom):
-                    lig_water_clashes.append((f"HOH{res_id}<->lig_atom{i}", float(np.linalg.norm(ow - lig_coords[i]))))
+                    lig_water_clashes.append(
+                        (
+                            f"HOH{res_id}<->lig_atom{i}",
+                            float(np.linalg.norm(ow - lig_coords[i])),
+                        )
+                    )
             if lig_tree is not None and rec_tree is not None:
                 for i in lig_tree.query_ball_point(ow, r=bridge_max_angstrom):
                     dl = float(np.linalg.norm(ow - lig_coords[i]))
@@ -318,7 +335,12 @@ def dock_with_and_without_crystal_waters(
 
     try:
         result_with_water = engine.dock(
-            request.model_copy(update={"receptor": receptor_with_waters, "workdir": work_dir / "with_water"})
+            request.model_copy(
+                update={
+                    "receptor": receptor_with_waters,
+                    "workdir": work_dir / "with_water",
+                }
+            )
         )
     # Docking backends may raise backend-specific exceptions depending on the
     # active executable, input structure, and search-space setup. This fallback

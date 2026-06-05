@@ -16,6 +16,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from gbsa_pipeline.docking import DockingBox, VinaEngine, prepare_ligand_with_meeko
+from gbsa_pipeline.docking._crystal_waters import _iter_water_oxygens
 from gbsa_pipeline.docking._receptor_prep import _merge_sdfs_into_pdb, _strip_hetatm, merge_pdb_structures
 
 if TYPE_CHECKING:
@@ -243,3 +244,66 @@ def test_merge_sdfs_into_pdb_invalid_sdf_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Could not read cofactor SDF"):
         _merge_sdfs_into_pdb(protein, [bad_sdf], out)
+
+
+# ---------------------------------------------------------------------------
+# _iter_water_oxygens tests
+# ---------------------------------------------------------------------------
+
+_MULTI_WATER_PDB = """\
+HETATM    1  O   HOH W   1      10.000  10.000  10.000  1.00  0.00           O
+HETATM    2  H1  HOH W   1      10.957  10.000  10.000  1.00  0.00           H
+HETATM    3  O   HOH W   2      11.000  11.000  11.000  1.00  0.00           O
+HETATM    4  H1  HOH W   2      11.957  11.000  11.000  1.00  0.00           H
+END
+"""
+
+_HYDROGEN_ONLY_PDB = """\
+ATOM      1  H   ALA A   1       1.000   2.000   3.000  1.00  0.00           H
+END
+"""
+
+
+def test_iter_water_oxygens_yields_one_per_residue(tmp_path: Path) -> None:
+    """Each residue contributes exactly one (res_id, xyz) pair."""
+    pdb = tmp_path / "waters.pdb"
+    pdb.write_text(_MULTI_WATER_PDB, encoding="utf-8")
+
+    results = list(_iter_water_oxygens(pdb))
+
+    assert len(results) == 2
+
+
+def test_iter_water_oxygens_correct_coords(tmp_path: Path) -> None:
+    """Yielded coordinates match the first heavy atom of each residue."""
+    pdb = tmp_path / "waters.pdb"
+    pdb.write_text(_MULTI_WATER_PDB, encoding="utf-8")
+
+    results = list(_iter_water_oxygens(pdb))
+
+    res_ids = [r[0] for r in results]
+    assert res_ids == ["1", "2"]
+    xyz0 = results[0][1]
+    assert abs(xyz0[0] - 10.0) < 0.01
+    assert abs(xyz0[1] - 10.0) < 0.01
+    assert abs(xyz0[2] - 10.0) < 0.01
+
+
+def test_iter_water_oxygens_skips_hydrogen_only_residues(tmp_path: Path) -> None:
+    """Residues with only hydrogen atoms are skipped."""
+    pdb = tmp_path / "honly.pdb"
+    pdb.write_text(_HYDROGEN_ONLY_PDB, encoding="utf-8")
+
+    results = list(_iter_water_oxygens(pdb))
+
+    assert results == []
+
+
+def test_iter_water_oxygens_empty_file(tmp_path: Path) -> None:
+    """An empty PDB yields nothing."""
+    pdb = tmp_path / "empty.pdb"
+    pdb.write_text("END\n", encoding="utf-8")
+
+    results = list(_iter_water_oxygens(pdb))
+
+    assert results == []
