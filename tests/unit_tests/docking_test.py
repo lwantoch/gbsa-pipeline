@@ -11,12 +11,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import gemmi
+import numpy as np
 import pytest
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from gbsa_pipeline.docking import DockingBox, VinaEngine, prepare_ligand_with_meeko
-from gbsa_pipeline.docking._crystal_waters import _iter_water_oxygens
+from gbsa_pipeline.docking._crystal_waters import (
+    _in_docking_box,
+    _iter_water_oxygens,
+    _read_pdb_like,
+    _write_chain_as_pdb,
+)
 from gbsa_pipeline.docking._receptor_prep import _merge_sdfs_into_pdb, _strip_hetatm, merge_pdb_structures
 
 if TYPE_CHECKING:
@@ -247,6 +254,46 @@ def test_merge_sdfs_into_pdb_invalid_sdf_raises(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# _read_pdb_like tests
+# ---------------------------------------------------------------------------
+
+_MULTI_MODEL_PDBQT = """\
+MODEL 1
+ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00  0.00           N
+ENDMDL
+MODEL 1
+ATOM      2  CA  ALA A   1       2.000   2.000   3.000  1.00  0.00           C
+ENDMDL
+"""
+
+_SINGLE_MODEL_PDB = """\
+ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00  0.00           N
+END
+"""
+
+
+def test_read_pdb_like_single_model(tmp_path: Path) -> None:
+    """A plain PDB is read without error."""
+    pdb = tmp_path / "single.pdb"
+    pdb.write_text(_SINGLE_MODEL_PDB, encoding="utf-8")
+    st = _read_pdb_like(pdb)
+    assert len(st) >= 1
+
+
+def test_read_pdb_like_multi_model_pdbqt_first_model_accessible(tmp_path: Path) -> None:
+    """A Vina PDBQT with duplicate MODEL 1 blocks is read without error.
+
+    Gemmi parses all MODEL blocks; callers use structure[0] to access the first pose.
+    """
+    pdbqt = tmp_path / "poses.pdbqt"
+    pdbqt.write_text(_MULTI_MODEL_PDBQT, encoding="utf-8")
+    st = _read_pdb_like(pdbqt)
+    assert len(st) >= 1
+    atoms = [atom for chain in st[0] for res in chain for atom in res]
+    assert len(atoms) == 1  # only the N from the first MODEL 1 block
+
+
+# ---------------------------------------------------------------------------
 # _iter_water_oxygens tests
 # ---------------------------------------------------------------------------
 
@@ -307,3 +354,76 @@ def test_iter_water_oxygens_empty_file(tmp_path: Path) -> None:
     results = list(_iter_water_oxygens(pdb))
 
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# _in_docking_box tests
+# ---------------------------------------------------------------------------
+
+_BOX = DockingBox(center=(10.0, 10.0, 10.0), size=(4.0, 6.0, 8.0))
+
+
+def test_in_docking_box_center_is_inside() -> None:
+    """The box center is inside the box."""
+    assert _in_docking_box(np.array([10.0, 10.0, 10.0]), _BOX)
+
+
+def test_in_docking_box_corner_is_inside() -> None:
+    """A point on the boundary is inside (inclusive)."""
+    assert _in_docking_box(np.array([8.0, 7.0, 6.0]), _BOX)
+
+
+def test_in_docking_box_outside_x() -> None:
+    """A point just beyond the x boundary is outside."""
+    assert not _in_docking_box(np.array([12.1, 10.0, 10.0]), _BOX)
+
+
+def test_in_docking_box_outside_y() -> None:
+    """A point just beyond the y boundary is outside."""
+    assert not _in_docking_box(np.array([10.0, 13.1, 10.0]), _BOX)
+
+
+def test_in_docking_box_outside_z() -> None:
+    """A point just beyond the z boundary is outside."""
+    assert not _in_docking_box(np.array([10.0, 10.0, 14.1]), _BOX)
+
+
+# ---------------------------------------------------------------------------
+# _write_chain_as_pdb tests
+# ---------------------------------------------------------------------------
+
+
+def _make_water_chain(chain_name: str = "W") -> gemmi.Chain:
+    chain = gemmi.Chain(chain_name)
+    res = gemmi.Residue()
+    res.name = "HOH"
+    res.seqid = gemmi.SeqId("1")
+    atom = gemmi.Atom()
+    atom.name = "O"
+    atom.pos = gemmi.Position(1.0, 2.0, 3.0)
+    atom.element = gemmi.Element("O")
+    res.add_atom(atom)
+    chain.add_residue(res)
+    return chain
+
+
+def test_write_chain_as_pdb_creates_file(tmp_path: Path) -> None:
+    """Output file is created."""
+    out = tmp_path / "chain.pdb"
+    _write_chain_as_pdb(_make_water_chain(), out)
+    assert out.exists()
+
+
+def test_write_chain_as_pdb_creates_parent_dir(tmp_path: Path) -> None:
+    """Parent directory is created if absent."""
+    out = tmp_path / "sub" / "chain.pdb"
+    _write_chain_as_pdb(_make_water_chain(), out)
+    assert out.exists()
+
+
+def test_write_chain_as_pdb_contains_residue(tmp_path: Path) -> None:
+    """Written PDB contains the residue added to the chain."""
+    out = tmp_path / "chain.pdb"
+    _write_chain_as_pdb(_make_water_chain(), out)
+    content = out.read_text(encoding="utf-8")
+    assert "HOH" in content

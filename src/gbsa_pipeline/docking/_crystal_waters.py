@@ -35,17 +35,8 @@ _WATER_RESNAMES: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL
 
 
 def _read_pdb_like(path: Path) -> gemmi.Structure:
-    """Read a PDB or PDBQT file; only the first MODEL block is kept.
-
-    Vina writes all poses into one PDBQT (MODEL 1…N). Gemmi raises on
-    duplicate model numbers when the full file is parsed, so we truncate to
-    the first ENDMDL before handing off to the parser.
-    """
-    text = path.read_text(encoding="utf-8", errors="replace")
-    endmdl = text.find("ENDMDL")
-    if endmdl != -1:
-        text = text[: endmdl + len("ENDMDL")] + "\nEND\n"
-    return gemmi.read_pdb_string(text)
+    """Read a PDB or PDBQT file into a gemmi Structure."""
+    return gemmi.read_pdb(str(path))
 
 
 def _atom_pos(atom: Any) -> np.ndarray:
@@ -92,6 +83,23 @@ def _pose_heavy_atom_coords(pose_path: Path) -> np.ndarray:
     if pose_path.suffix.lower() in (".pdb", ".pdbqt"):
         return _pdb_heavy_atom_coords(pose_path, exclude_residues=frozenset())
     return _sdf_heavy_atom_coords(pose_path)
+
+
+def _in_docking_box(pos: np.ndarray, box: DockingBox) -> bool:
+    """Return True if pos lies inside the docking box (boundaries inclusive)."""
+    cx, cy, cz = box.center
+    hx, hy, hz = box.size[0] / 2.0, box.size[1] / 2.0, box.size[2] / 2.0
+    return cx - hx <= pos[0] <= cx + hx and cy - hy <= pos[1] <= cy + hy and cz - hz <= pos[2] <= cz + hz
+
+
+def _write_chain_as_pdb(chain: gemmi.Chain, path: Path) -> None:
+    """Write a single gemmi Chain to a PDB file, creating parent directories."""
+    model = gemmi.Model("1")
+    model.add_chain(chain)
+    st = gemmi.Structure()
+    st.add_model(model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    st.write_pdb(str(path))
 
 
 def _iter_water_oxygens(pdb_path: Path) -> Iterator[tuple[str, np.ndarray]]:
@@ -158,9 +166,6 @@ def select_docking_crystal_waters(
     lig_tree = cKDTree(lig_coords) if lig_coords.size > 0 else None
     rec_tree = cKDTree(rec_coords) if rec_coords.size > 0 else None
 
-    cx, cy, cz = box.center
-    hx, hy, hz = box.size[0] / 2.0, box.size[1] / 2.0, box.size[2] / 2.0
-
     out_chain = gemmi.Chain("W")
     retained_ids: list[str] = []
 
@@ -169,7 +174,7 @@ def select_docking_crystal_waters(
             if (_ha := _first_heavy_atom(residue)) is None:
                 continue
             ow = _atom_pos(_ha)
-            if not (cx - hx <= ow[0] <= cx + hx and cy - hy <= ow[1] <= cy + hy and cz - hz <= ow[2] <= cz + hz):
+            if not _in_docking_box(ow, box):
                 continue
             if lig_tree is not None and not lig_tree.query_ball_point(ow, r=ligand_cutoff_angstrom):
                 continue
@@ -183,13 +188,7 @@ def select_docking_crystal_waters(
         LOGGER.debug("No crystal waters survived selection.")
         return None, []
 
-    out_model = gemmi.Model("1")
-    out_model.add_chain(out_chain)
-    out_st = gemmi.Structure()
-    out_st.add_model(out_model)
-    output_pdb.parent.mkdir(parents=True, exist_ok=True)
-    out_st.write_pdb(str(output_pdb))
-
+    _write_chain_as_pdb(out_chain, output_pdb)
     LOGGER.info("Selected %d crystal waters: %s", len(retained_ids), retained_ids)
     return output_pdb, retained_ids
 
