@@ -5,12 +5,30 @@ from __future__ import annotations
 from collections.abc import Hashable
 from typing import TypeVar
 
+import numpy as np
+
 _Coords = tuple[float, float, float]
 _ResKey = tuple[int, str]  # canonical key for GRO residues; kept for _gro_io.py annotations
 _CellGrid = dict[tuple[int, int, int], list[_Coords]]
 _NEIGHBOUR_OFFSETS = tuple((dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1))
 
 _K = TypeVar("_K", bound=Hashable)
+
+
+def contact_pairs(
+    a_coords: np.ndarray,
+    b_coords: np.ndarray,
+    cutoff: float,
+) -> list[tuple[int, int, float]]:
+    """Return ``(i, j, distance)`` for every pair of atoms within ``cutoff``.
+
+    Both arrays are ``(N, 3)`` in the same unit system.  The boundary is
+    inclusive (pairs at exactly ``cutoff`` are included).
+    """
+    if a_coords.size == 0 or b_coords.size == 0:
+        return []
+    dists = np.linalg.norm(a_coords[:, None] - b_coords[None, :], axis=-1)
+    return [(int(i), int(j), float(dists[i, j])) for i, j in np.argwhere(dists <= cutoff)]
 
 
 def _build_cell_grid(coords: list[_Coords], cell_size: float) -> _CellGrid:

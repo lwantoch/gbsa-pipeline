@@ -22,7 +22,7 @@ from gbsa_pipeline.docking._crystal_waters import (
     _detect_clashes,
     _find_water_bridges,
     _in_docking_box,
-    _iter_water_oxygens,
+    _iter_residue_coords,
     _read_pdb_like,
     _write_chain_as_pdb,
     select_docking_crystal_waters,
@@ -298,7 +298,7 @@ def test_read_pdb_like_multi_model_pdbqt_first_model_accessible(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# _iter_water_oxygens tests
+# _iter_residue_coords tests
 # ---------------------------------------------------------------------------
 
 _MULTI_WATER_PDB = """\
@@ -315,22 +315,22 @@ END
 """
 
 
-def test_iter_water_oxygens_yields_one_per_residue(tmp_path: Path) -> None:
+def test_iter_residue_coords_yields_one_per_residue(tmp_path: Path) -> None:
     """Each residue contributes exactly one (res_id, xyz) pair."""
     pdb = tmp_path / "waters.pdb"
     pdb.write_text(_MULTI_WATER_PDB, encoding="utf-8")
 
-    results = list(_iter_water_oxygens(pdb))
+    results = list(_iter_residue_coords(pdb))
 
     assert len(results) == 2
 
 
-def test_iter_water_oxygens_correct_coords(tmp_path: Path) -> None:
+def test_iter_residue_coords_correct_coords(tmp_path: Path) -> None:
     """Yielded coordinates match the first heavy atom of each residue."""
     pdb = tmp_path / "waters.pdb"
     pdb.write_text(_MULTI_WATER_PDB, encoding="utf-8")
 
-    results = list(_iter_water_oxygens(pdb))
+    results = list(_iter_residue_coords(pdb))
 
     res_ids = [r[0] for r in results]
     assert res_ids == ["1", "2"]
@@ -340,22 +340,22 @@ def test_iter_water_oxygens_correct_coords(tmp_path: Path) -> None:
     assert abs(xyz0[2] - 10.0) < 0.01
 
 
-def test_iter_water_oxygens_skips_hydrogen_only_residues(tmp_path: Path) -> None:
+def test_iter_residue_coords_skips_hydrogen_only_residues(tmp_path: Path) -> None:
     """Residues with only hydrogen atoms are skipped."""
     pdb = tmp_path / "honly.pdb"
     pdb.write_text(_HYDROGEN_ONLY_PDB, encoding="utf-8")
 
-    results = list(_iter_water_oxygens(pdb))
+    results = list(_iter_residue_coords(pdb))
 
     assert results == []
 
 
-def test_iter_water_oxygens_empty_file(tmp_path: Path) -> None:
+def test_iter_residue_coords_empty_file(tmp_path: Path) -> None:
     """An empty PDB yields nothing."""
     pdb = tmp_path / "empty.pdb"
     pdb.write_text("END\n", encoding="utf-8")
 
-    results = list(_iter_water_oxygens(pdb))
+    results = list(_iter_residue_coords(pdb))
 
     assert results == []
 
