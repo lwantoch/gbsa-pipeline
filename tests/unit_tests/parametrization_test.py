@@ -16,6 +16,7 @@ from gbsa_pipeline.parametrization import (
     _collect_pdb_resnums,
     _pdb_sidechain_names_by_depth,
     _strip_mol2_dipeptide_caps,
+    _strip_mol2_or_original,
     _write_crystal_waters_pdb,
     export_gromacs_top_gro,
     load_protein_pdb,
@@ -404,3 +405,38 @@ def test_strip_mol2_dipeptide_caps_no_ace_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="ACE"):
         _strip_mol2_dipeptide_caps(mol2, out)
+
+
+# ---------------------------------------------------------------------------
+# _strip_mol2_or_original tests
+# ---------------------------------------------------------------------------
+
+
+def test_strip_mol2_or_original_returns_stripped_path(tmp_path: Path) -> None:
+    """On success, returns work_dir/<stem>_stripped.mol2 with caps removed."""
+    mol2 = tmp_path / "ALA.mol2"
+    mol2.write_text(_ACE_ALA_NME_MOL2, encoding="utf-8")
+
+    result = _strip_mol2_or_original(mol2, tmp_path)
+
+    assert result == tmp_path / "ALA_stripped.mol2"
+    assert result.exists()
+    names = set(_mol2_atom_names(result.read_text(encoding="utf-8")))
+    assert {"N", "CA", "C", "O"}.issubset(names)
+
+
+def test_strip_mol2_or_original_returns_original_on_failure(tmp_path: Path) -> None:
+    """When stripping fails (no ACE cap), returns the original path unchanged."""
+    mol2 = pathlib.Path("tests/testdata/CM1.mol2")
+
+    result = _strip_mol2_or_original(mol2, tmp_path)
+
+    assert result == mol2
+
+
+def test_strip_mol2_or_original_warns_on_failure(tmp_path: Path) -> None:
+    """A UserWarning is emitted when stripping fails."""
+    mol2 = pathlib.Path("tests/testdata/CM1.mol2")
+
+    with pytest.warns(UserWarning, match="Cap stripping skipped"):
+        _strip_mol2_or_original(mol2, tmp_path)

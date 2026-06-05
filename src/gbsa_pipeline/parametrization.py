@@ -595,6 +595,28 @@ def _strip_mol2_dipeptide_caps_text(
     return output_mol2
 
 
+def _strip_mol2_or_original(
+    mol2: Path,
+    work_dir: Path,
+    protein_pdb: Path | None = None,
+) -> Path:
+    """Strip ACE/NME caps from mol2, falling back to the original path on any failure.
+
+    Returns ``work_dir/<stem>_stripped.mol2`` on success, or the original ``mol2``
+    path unchanged when stripping fails (e.g. the file is already a bare residue
+    template produced by MCPB.py). A :class:`UserWarning` is emitted in the
+    fallback case so callers are informed without raising.
+    """
+    stripped = work_dir / f"{mol2.stem}_stripped.mol2"
+    try:
+        _strip_mol2_dipeptide_caps(mol2, stripped, protein_pdb=protein_pdb)
+    except Exception as exc:  # noqa: BLE001
+        warnings.warn(f"Cap stripping skipped for {mol2.name}: {exc}", stacklevel=2)
+        return mol2
+    else:
+        return stripped
+
+
 # ---------------------------------------------------------------------------
 # tleap/antechamber helpers (used when extra_ff has mol2/frcmod files)
 # ---------------------------------------------------------------------------
@@ -1207,19 +1229,7 @@ def _parametrize_tleap(inp: ParametrizationInput) -> ParametrisedComplex:
 
     # Strip ACE/NME caps from mol2 files prepared as capped dipeptides.
     # MCPB.py mol2s (CS1-4, ZN1) are already stripped residue templates;
-    # _strip_mol2_dipeptide_caps raises ValueError for them, so we fall back
-    # to the original mol2 unchanged — which is correct for tleap.
-    stripped_mol2s: list[Path] = []
-    for mol2 in mol2_files:
-        stripped = work_dir / f"{mol2.stem}_stripped.mol2"
-        try:
-            _strip_mol2_dipeptide_caps(mol2, stripped, protein_pdb=source_pdb)
-            stripped_mol2s.append(stripped)
-        # Mol2 templates come from heterogeneous chemistry tools; this fallback
-        # intentionally keeps already-stripped templates unchanged on any parser failure.
-        except Exception as exc:  # noqa: BLE001
-            warnings.warn(f"Cap stripping skipped for {mol2.name}: {exc}", stacklevel=2)
-            stripped_mol2s.append(mol2)
+    stripped_mol2s = [_strip_mol2_or_original(mol2, work_dir, source_pdb) for mol2 in mol2_files]
 
     # Parametrize ligand with antechamber + parmchk2 (GAFF2 + AM1-BCC).
     lig_work = work_dir / "ligand"
@@ -1406,8 +1416,14 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
     protein_modeller = _load_pdb_as_modeller(inp.protein_pdb)
     n_removed = _delete_residues_by_name(protein_modeller, _WATER_RESIDUE_NAMES_SET)
     if n_removed:
-        logger.debug("Removed %d crystallographic water residue(s) from protein topology.", n_removed)
-    logger.debug("Protein PDB loaded without crystal waters (%d atoms).", protein_modeller.topology.getNumAtoms())
+        logger.debug(
+            "Removed %d crystallographic water residue(s) from protein topology.",
+            n_removed,
+        )
+    logger.debug(
+        "Protein PDB loaded without crystal waters (%d atoms).",
+        protein_modeller.topology.getNumAtoms(),
+    )
 
     # --- Ligand --------------------------------------------------------
     logger.debug("Loading ligand SDF: %s …", inp.ligand_sdf)
@@ -1449,7 +1465,10 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
             cof.n_atoms,
             len(cof.conformers),
         )
-        logger.debug("Assigning partial charges to cofactor (method=%s) …", inp.config.charge_method.value)
+        logger.debug(
+            "Assigning partial charges to cofactor (method=%s) …",
+            inp.config.charge_method.value,
+        )
         try:
             cof.assign_partial_charges(
                 partial_charge_method=inp.config.charge_method.value,
