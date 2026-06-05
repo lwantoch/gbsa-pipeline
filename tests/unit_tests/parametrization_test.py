@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -14,6 +15,7 @@ import pytest
 from gbsa_pipeline.parametrization import (
     _collect_pdb_resnums,
     _pdb_sidechain_names_by_depth,
+    _strip_mol2_dipeptide_caps,
     _write_crystal_waters_pdb,
     export_gromacs_top_gro,
     load_protein_pdb,
@@ -277,3 +279,128 @@ def test_collect_pdb_resnums_separates_atom_hetatm(tmp_path: Path) -> None:
 
     assert atom_resnums == {1, 2}
     assert hetatm_resnums == {100, 101}
+
+
+# ---------------------------------------------------------------------------
+# _strip_mol2_dipeptide_caps tests
+# ---------------------------------------------------------------------------
+
+# Minimal ACE-ALA-NME capped dipeptide in GAFF atom types.
+# Three substructures in the SUBSTRUCTURE section cause pmd.load_file() to
+# return ResidueTemplateContainer (not Structure) unless structure=True is
+# passed — this is the root cause of the bug we fix in the implementation.
+_ACE_ALA_NME_MOL2 = """\
+@<TRIPOS>MOLECULE
+ALA
+   22    21     3     0     0
+SMALL
+RESP Charge
+
+
+@<TRIPOS>ATOM
+      1 C1       -2.0000   0.0000   0.0000 c3        1 ACE      0.1160
+      2 C2       -1.0000   0.0000   0.0000 c         1 ACE      0.5970
+      3 O3       -1.0000   1.0000   0.0000 o         1 ACE     -0.5680
+      4 H4       -2.0000   1.0000   0.0000 h1        1 ACE      0.1010
+      5 H5       -2.0000  -1.0000   0.0000 h1        1 ACE      0.1010
+      6 H6       -3.0000   0.0000   0.0000 h1        1 ACE      0.1010
+      7 N7        0.0000   0.0000   0.0000 n         2 ALA     -0.4160
+      8 H8        0.0000   1.0000   0.0000 hn        2 ALA      0.2730
+      9 C9        1.0000   0.0000   0.0000 c3        2 ALA      0.0340
+     10 H10       1.0000   1.0000   0.0000 h1        2 ALA      0.0820
+     11 C11       1.0000   0.0000   1.0000 c3        2 ALA     -0.1820
+     12 H12       0.0000   0.0000   1.0000 hc        2 ALA      0.0600
+     13 H13       1.0000   1.0000   1.0000 hc        2 ALA      0.0600
+     14 H14       2.0000   0.0000   1.0000 hc        2 ALA      0.0600
+     15 C15       2.0000   0.0000   0.0000 c         2 ALA      0.5970
+     16 O16       2.0000   1.0000   0.0000 o         2 ALA     -0.5680
+     17 N17       3.0000   0.0000   0.0000 n         3 NME     -0.4160
+     18 H18       3.0000   1.0000   0.0000 hn        3 NME      0.2730
+     19 C19       4.0000   0.0000   0.0000 c3        3 NME      0.1160
+     20 H20       5.0000   0.0000   0.0000 hc        3 NME      0.0970
+     21 H21       4.0000   1.0000   0.0000 hc        3 NME      0.0970
+     22 H22       4.0000  -1.0000   0.0000 hc        3 NME      0.0970
+@<TRIPOS>BOND
+     1     1     2 1
+     2     2     3 2
+     3     1     4 1
+     4     1     5 1
+     5     1     6 1
+     6     2     7 am
+     7     7     8 1
+     8     7     9 1
+     9     9    10 1
+    10     9    11 1
+    11    11    12 1
+    12    11    13 1
+    13    11    14 1
+    14     9    15 1
+    15    15    16 2
+    16    15    17 am
+    17    17    18 1
+    18    17    19 1
+    19    19    20 1
+    20    19    21 1
+    21    19    22 1
+@<TRIPOS>SUBSTRUCTURE
+     1 ACE         1 TEMP              0 ****  ****    0 ROOT
+     2 ALA         7 TEMP              0 ****  ****    0 ROOT
+     3 NME        17 TEMP              0 ****  ****    0 ROOT
+"""
+
+
+def _mol2_atom_names(content: str) -> list[str]:
+    """Return atom names from the @<TRIPOS>ATOM section of a mol2 string."""
+    in_atom = False
+    names: list[str] = []
+    for line in content.splitlines():
+        if line.startswith("@<TRIPOS>ATOM"):
+            in_atom = True
+            continue
+        if line.startswith("@<TRIPOS>"):
+            in_atom = False
+            continue
+        if in_atom and line.strip():
+            parts = line.split()
+            if len(parts) >= 2:
+                names.append(parts[1])
+    return names
+
+
+def test_strip_mol2_dipeptide_caps_removes_ace_nme(tmp_path: Path) -> None:
+    """ACE and NME residues are stripped; only ALA atoms remain in the output."""
+    mol2 = tmp_path / "ace_ala_nme.mol2"
+    out = tmp_path / "stripped.mol2"
+    mol2.write_text(_ACE_ALA_NME_MOL2, encoding="utf-8")
+
+    result = _strip_mol2_dipeptide_caps(mol2, out)
+
+    assert result == out
+    assert out.exists()
+    content = out.read_text(encoding="utf-8")
+    names = _mol2_atom_names(content)
+    # ACE has 6 atoms, ALA has 10, NME has 6; only ALA should remain
+    assert len(names) == 10
+    assert "ACE" not in content
+    assert "NME" not in content
+
+
+def test_strip_mol2_dipeptide_caps_renames_backbone(tmp_path: Path) -> None:
+    """Backbone atoms in the stripped mol2 carry AMBER ff14SB names N/H/CA/HA/CB/C/O."""
+    mol2 = tmp_path / "ace_ala_nme.mol2"
+    out = tmp_path / "stripped.mol2"
+    mol2.write_text(_ACE_ALA_NME_MOL2, encoding="utf-8")
+
+    _strip_mol2_dipeptide_caps(mol2, out)
+
+    names = set(_mol2_atom_names(out.read_text(encoding="utf-8")))
+    assert {"N", "H", "CA", "HA", "CB", "C", "O"}.issubset(names)
+
+
+def test_strip_mol2_dipeptide_caps_no_ace_raises(tmp_path: Path) -> None:
+    """A single-residue mol2 without ACE raises ValueError."""
+    mol2 = pathlib.Path("tests/testdata/CM1.mol2")
+    out = tmp_path / "stripped.mol2"
+
+    with pytest.raises(ValueError, match="ACE"):
+        _strip_mol2_dipeptide_caps(mol2, out)

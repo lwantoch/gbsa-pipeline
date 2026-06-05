@@ -185,7 +185,7 @@ def _strip_mol2_dipeptide_caps_parmed(
     protein_pdb: Path | None = None,
 ) -> Path:
     """ParmEd-based cap stripping: load mol2, rename backbone atoms, strip ACE/NME, save."""
-    structure = pmd.load_file(str(mol2_path))
+    structure = pmd.load_file(str(mol2_path), structure=True)
 
     res_names = {r.name.upper() for r in structure.residues}
     if "ACE" not in res_names:
@@ -343,7 +343,7 @@ def _strip_mol2_dipeptide_caps(
     """
     try:
         return _strip_mol2_dipeptide_caps_parmed(mol2_path, output_mol2, protein_pdb)
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
         logger.warning(
             "ParmEd cap stripping failed for %s; falling back to text-based stripping: %s",
             mol2_path,
