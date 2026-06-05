@@ -35,29 +35,22 @@ def _strip_hetatm(receptor_pdb: Path, dest: Path) -> Path:
 def _merge_sdfs_into_pdb(pdb: Path, sdfs: list[Path], output: Path) -> Path:
     """Append cofactor SDF atoms to a protein PDB as HETATM records.
 
-    Each SDF is read with RDKit (hydrogens preserved) and its coordinate records
-    are appended after the protein ATOM lines so meeko assigns AutoDock atom
-    types to protein and cofactor(s) together in one pass.
+    Each SDF is read with RDKit (hydrogens preserved) and its chains are merged
+    into the protein structure via gemmi so meeko assigns AutoDock atom types to
+    protein and cofactor(s) together in one pass.
     """
-    protein_lines = [
-        line
-        for line in pdb.read_text(encoding="utf-8").splitlines(keepends=True)
-        if not line.startswith(("TER", "END"))
-    ]
-
-    cofactor_lines: list[str] = []
+    st = gemmi.read_pdb(str(pdb))
     for sdf in sdfs:
         supplier = Chem.SDMolSupplier(str(sdf), removeHs=False)
         mol = next(iter(supplier), None)
         if mol is None:
             raise ValueError(f"Could not read cofactor SDF: {sdf}")
         pdb_block = Chem.MolToPDBBlock(mol) or ""
-        cofactor_lines.extend(
-            line for line in pdb_block.splitlines(keepends=True) if line.startswith(("ATOM", "HETATM"))
-        )
-
+        cofactor_st = gemmi.read_pdb_string(pdb_block)
+        for chain in cofactor_st[0]:
+            st[0].add_chain(chain, unique_name=True)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("".join(protein_lines) + "".join(cofactor_lines) + "END\n", encoding="utf-8")
+    st.write_pdb(str(output))
     return output
 
 

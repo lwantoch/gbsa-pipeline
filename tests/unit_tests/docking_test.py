@@ -11,11 +11,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
 from gbsa_pipeline.docking import DockingBox, VinaEngine, prepare_ligand_with_meeko
+from gbsa_pipeline.docking._receptor_prep import _merge_sdfs_into_pdb, _strip_hetatm, merge_pdb_structures
 
 if TYPE_CHECKING:
     from pathlib import Path
-from gbsa_pipeline.docking._receptor_prep import _strip_hetatm, merge_pdb_structures
 
 
 def test_meeko_smiles_to_pdbqt(tmp_path: Path) -> None:
@@ -182,3 +186,60 @@ def test_merge_pdb_structures_creates_parent(tmp_path: Path) -> None:
     merge_pdb_structures(protein, waters, out)
 
     assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# _merge_sdfs_into_pdb tests
+# ---------------------------------------------------------------------------
+
+
+def _write_ethanol_sdf(path: Path) -> None:
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    AllChem.EmbedMolecule(mol, randomSeed=42)  # type: ignore[attr-defined]
+    with Chem.SDWriter(str(path)) as w:
+        w.write(mol)
+
+
+def test_merge_sdfs_into_pdb_includes_cofactor(tmp_path: Path) -> None:
+    """Output contains protein ATOM records and cofactor HETATM records."""
+    protein = tmp_path / "protein.pdb"
+    sdf = tmp_path / "cofactor.sdf"
+    out = tmp_path / "merged.pdb"
+    protein.write_text(_PROTEIN_PDB, encoding="utf-8")
+    _write_ethanol_sdf(sdf)
+
+    result = _merge_sdfs_into_pdb(protein, [sdf], out)
+
+    assert result == out
+    assert out.exists()
+    content = out.read_text(encoding="utf-8")
+    assert "ALA" in content
+    assert "HETATM" in content
+
+
+def test_merge_sdfs_into_pdb_multiple_sdfs(tmp_path: Path) -> None:
+    """All chains from multiple SDFs are appended to the protein."""
+    protein = tmp_path / "protein.pdb"
+    sdf1 = tmp_path / "cof1.sdf"
+    sdf2 = tmp_path / "cof2.sdf"
+    out = tmp_path / "merged.pdb"
+    protein.write_text(_PROTEIN_PDB, encoding="utf-8")
+    _write_ethanol_sdf(sdf1)
+    _write_ethanol_sdf(sdf2)
+
+    _merge_sdfs_into_pdb(protein, [sdf1, sdf2], out)
+
+    content = out.read_text(encoding="utf-8")
+    assert content.count("HETATM") >= 2
+
+
+def test_merge_sdfs_into_pdb_invalid_sdf_raises(tmp_path: Path) -> None:
+    """An unreadable SDF raises ValueError."""
+    protein = tmp_path / "protein.pdb"
+    bad_sdf = tmp_path / "bad.sdf"
+    out = tmp_path / "merged.pdb"
+    protein.write_text(_PROTEIN_PDB, encoding="utf-8")
+    bad_sdf.write_text("not a valid sdf", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Could not read cofactor SDF"):
+        _merge_sdfs_into_pdb(protein, [bad_sdf], out)
