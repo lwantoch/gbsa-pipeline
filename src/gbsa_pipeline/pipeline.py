@@ -18,13 +18,12 @@ from gbsa_pipeline.md import (
 )
 from gbsa_pipeline.md_io import save_bss_system_to_gromacs
 from gbsa_pipeline.parametrization import parametrize
-from gbsa_pipeline.solvation_box import SolvationParams
 from gbsa_pipeline.solvation_bss import solvate_bss
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from gbsa_pipeline.config import RunConfig, SolvationConfig
+    from gbsa_pipeline.config import RunConfig
     from gbsa_pipeline.parametrization import ParametrisedComplex
 
 logger = logging.getLogger(__name__)
@@ -50,6 +49,23 @@ def _run_stage(name: str, fn: Callable[[], _T]) -> _T:
     elapsed = time.perf_counter() - t0
     logger.info("  [%s] completed in %.1f s", name, elapsed)
     return result
+
+
+def _run_md_stage(
+    title: str,
+    name: str,
+    label: str,
+    output_dir: Path,
+    fn: Callable[[Path], Any],
+) -> Any:
+    """Run one MD stage: log banner, mkdir, run, save gro/top, return system."""
+    logger.info("─── %s ───", title)
+    stage_dir = output_dir / label
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    system = _run_stage(name, lambda: fn(stage_dir))
+    save_bss_system_to_gromacs(system, stage_dir / "system")
+    logger.info("  Saved → %s/system.gro / .top", label)
+    return system
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +101,7 @@ def _stage_solvate(
     )
     solvated = solvate_bss(
         parametrized=parametrized,
-        params=_to_solvation_params(sol),
+        params=sol,
         output_gro=stage_dir / "solvated.gro",
         output_top=stage_dir / "solvated.top",
     )
@@ -199,53 +215,40 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
     sol_dir = output_dir / "02_solvated"
     system = _run_stage("solvation", lambda: _stage_solvate(config, parametrized, sol_dir))
 
-    # Stage 3: SD minimization
-    logger.info("─── Stage 3/8: SD Minimization ───")
-    sd_dir = output_dir / "03_sd"
-    sd_dir.mkdir(parents=True, exist_ok=True)
-    system = _run_stage("sd_minimization", lambda: _stage_minimize_sd(config, system, sd_dir))
-    save_bss_system_to_gromacs(system, sd_dir / "system")
-    logger.info("  Saved → 03_sd/system.gro / .top")
-
-    # Stage 4: CG minimization
-    logger.info("─── Stage 4/8: CG Minimization ───")
-    cg_dir = output_dir / "04_cg"
-    cg_dir.mkdir(parents=True, exist_ok=True)
-    system = _run_stage("cg_minimization", lambda: _stage_minimize_cg(system, cg_dir))
-    save_bss_system_to_gromacs(system, cg_dir / "system")
-    logger.info("  Saved → 04_cg/system.gro / .top")
-
-    # Stage 5: NVT restrained heating
-    logger.info("─── Stage 5/8: NVT Restrained Heating ───")
-    nvt_dir = output_dir / "05_nvt_res"
-    nvt_dir.mkdir(parents=True, exist_ok=True)
-    system = _run_stage("nvt_restrained", lambda: _stage_nvt_restrained(config, system, nvt_dir))
-    save_bss_system_to_gromacs(system, nvt_dir / "system")
-    logger.info("  Saved → 05_nvt_res/system.gro / .top")
-
-    # Stage 6: NPT restrained equilibration
-    logger.info("─── Stage 6/8: NPT Restrained Equilibration ───")
-    npt_res_dir = output_dir / "06_npt_res"
-    npt_res_dir.mkdir(parents=True, exist_ok=True)
-    system = _run_stage("npt_restrained", lambda: _stage_npt_restrained(config, system, npt_res_dir))
-    save_bss_system_to_gromacs(system, npt_res_dir / "system")
-    logger.info("  Saved → 06_npt_res/system.gro / .top")
-
-    # Stage 7: NPT unrestrained equilibration
-    logger.info("─── Stage 7/8: NPT Equilibration ───")
-    npt_dir = output_dir / "07_npt"
-    npt_dir.mkdir(parents=True, exist_ok=True)
-    system = _run_stage("npt", lambda: _stage_npt(config, system, npt_dir))
-    save_bss_system_to_gromacs(system, npt_dir / "system")
-    logger.info("  Saved → 07_npt/system.gro / .top")
-
-    # Stage 8: Production MD
-    logger.info("─── Stage 8/8: Production MD ───")
-    prod_dir = output_dir / "08_production"
-    prod_dir.mkdir(parents=True, exist_ok=True)
-    system = _run_stage("production_md", lambda: _stage_production(config, system, prod_dir))
-    save_bss_system_to_gromacs(system, prod_dir / "system")
-    logger.info("  Saved → 08_production/system.gro / .top")
+    system = _run_md_stage(
+        "Stage 3/8: SD Minimization",
+        "sd_minimization",
+        "03_sd",
+        output_dir,
+        lambda d: _stage_minimize_sd(config, system, d),
+    )
+    system = _run_md_stage(
+        "Stage 4/8: CG Minimization", "cg_minimization", "04_cg", output_dir, lambda d: _stage_minimize_cg(system, d)
+    )
+    system = _run_md_stage(
+        "Stage 5/8: NVT Restrained Heating",
+        "nvt_restrained",
+        "05_nvt_res",
+        output_dir,
+        lambda d: _stage_nvt_restrained(config, system, d),
+    )
+    system = _run_md_stage(
+        "Stage 6/8: NPT Restrained Equilibration",
+        "npt_restrained",
+        "06_npt_res",
+        output_dir,
+        lambda d: _stage_npt_restrained(config, system, d),
+    )
+    system = _run_md_stage(
+        "Stage 7/8: NPT Equilibration", "npt", "07_npt", output_dir, lambda d: _stage_npt(config, system, d)
+    )
+    system = _run_md_stage(
+        "Stage 8/8: Production MD",
+        "production_md",
+        "08_production",
+        output_dir,
+        lambda d: _stage_production(config, system, d),
+    )
 
     logger.info("Pipeline complete. Output written to %s", output_dir)
 
@@ -253,11 +256,6 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _to_solvation_params(cfg: SolvationConfig) -> SolvationParams:
-    """Map a :class:`~gbsa_pipeline.config.SolvationConfig` to a :class:`~gbsa_pipeline.solvation_box.SolvationParams`."""
-    return SolvationParams(**cfg.model_dump())
 
 
 def _log_config(config: RunConfig, output_dir: Path) -> None:

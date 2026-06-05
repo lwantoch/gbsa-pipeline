@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gbsa_pipeline.mdp import GromacsParams
 from gbsa_pipeline.parametrization import ParametrizationConfig, ParametrizationInput
-from gbsa_pipeline.solvation_box import BoxShape, WaterModel
+from gbsa_pipeline.solvation_box import BoxShape, SolvationParams
 
 
 class SystemConfig(BaseModel):
@@ -25,17 +25,12 @@ class SystemConfig(BaseModel):
     net_charge: int | None = None
 
 
-class SolvationConfig(BaseModel):
-    """[solvation] section — solvent box settings."""
+class SolvationConfig(SolvationParams):
+    """[solvation] section — solvent box settings with pipeline defaults."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    water_model: WaterModel = WaterModel.TIP3P
     shape: BoxShape = BoxShape.TRUNCATED_OCTAHEDRON
-    padding: float | None = None
-    box_size: float | None = 8.0
-    ion_concentration: float = 0.15
-    neutralize: bool = True
+    padding: float | None = Field(default=None, ge=0.0)
+    ion_concentration: float | None = Field(default=0.15, ge=0.0)
 
 
 class MinimizationConfig(BaseModel):

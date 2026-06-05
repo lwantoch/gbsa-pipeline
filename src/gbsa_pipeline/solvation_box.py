@@ -108,37 +108,6 @@ class SolvationParams(BaseModel):
     neutralize: bool = True
     ion_concentration: float | None = Field(default=None, ge=0.0)
 
-    def __init__(
-        self,
-        *,
-        water_model: WaterModel | str = WaterModel.TIP3P,
-        shape: BoxShape | str = BoxShape.CUBIC,
-        padding: float | None = 1.0,
-        box_size: float | None = 8.0,
-        neutralize: bool = True,
-        ion_concentration: float | None = None,
-        **data: Any,
-    ) -> None:
-        """Create validated solvation parameters from enum or string input.
-
-        The explicit constructor keeps existing mypy-checked call sites working
-        when they pass strings such as ``"tip3p"`` or ``"cubic"``. Pydantic
-        still performs the real validation and stores enum values on the model.
-        Extra keyword arguments are passed through so Pydantic can report
-        forbidden fields through the normal model validation path. Downstream
-        code can therefore use ``params.water_model`` and ``params.shape`` as
-        typed enums.
-        """
-        super().__init__(
-            water_model=water_model,
-            shape=shape,
-            padding=padding,
-            box_size=box_size,
-            neutralize=neutralize,
-            ion_concentration=ion_concentration,
-            **data,
-        )
-
     @field_validator("water_model", "shape", mode="before")
     @classmethod
     def _normalise_enum_input(cls, value: object) -> object:
