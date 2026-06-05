@@ -12,17 +12,19 @@ if TYPE_CHECKING:
 import BioSimSpace as BSS
 import pytest
 
-from gbsa_pipeline.parametrization import (
-    _collect_pdb_resnums,
+from gbsa_pipeline.mol2_utils import (
     _pdb_sidechain_names_by_depth,
     _strip_mol2_dipeptide_caps,
     _strip_mol2_or_original,
-    _write_crystal_waters_pdb,
+)
+from gbsa_pipeline.parametrization import (
     export_gromacs_top_gro,
     load_protein_pdb,
     parameterise_ligand_gaff2,
     parameterise_protein_amber,
 )
+from gbsa_pipeline.parametrization_models import _write_crystal_waters_pdb
+from gbsa_pipeline.tleap import _collect_pdb_resnums
 
 
 def test_read_1of1_molecules() -> None:
