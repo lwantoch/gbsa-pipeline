@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import (
-    Path,  # noqa: TC003 — Pydantic needs Path at runtime to resolve field types
-)
+from pathlib import Path
 from typing import Any
 
 import tomllib
@@ -12,8 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gbsa_pipeline.mdp import GromacsParams
 from gbsa_pipeline.parametrization import ParametrizationConfig, ParametrizationInput
-from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
-from gbsa_pipeline.solvation_box import BoxShape, WaterModel
+from gbsa_pipeline.solvation_box import BoxShape, SolvationParams
 
 
 class SystemConfig(BaseModel):
@@ -23,31 +20,15 @@ class SystemConfig(BaseModel):
 
     protein: Path
     ligand: Path | None = None
-    extra_ff_files: tuple[Path, ...] = ()
     net_charge: int | None = None
 
 
-class ForceFieldConfig(BaseModel):
-    """[forcefield] section — force field and charge method choices."""
+class SolvationConfig(SolvationParams):
+    """[solvation] section — solvent box settings with pipeline defaults."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    protein_ff: ProteinFF = ProteinFF.FF14SB
-    ligand_ff: LigandFF = LigandFF.GAFF2
-    charge_method: ChargeMethod = ChargeMethod.AM1BCC
-
-
-class SolvationConfig(BaseModel):
-    """[solvation] section — solvent box settings."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    water_model: WaterModel = WaterModel.TIP3P
-    box_shape: BoxShape = BoxShape.TRUNCATED_OCTAHEDRON
-    padding: float | None = None
-    box_size: float | None = 8.0
-    ion_concentration: float = 0.15
-    neutralize: bool = True
+    shape: BoxShape = BoxShape.TRUNCATED_OCTAHEDRON
+    padding: float | None = Field(default=None, ge=0.0)
+    ion_concentration: float | None = Field(default=0.15, ge=0.0)
 
 
 class MinimizationConfig(BaseModel):
@@ -115,7 +96,7 @@ class RunConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     system: SystemConfig
-    forcefield: ForceFieldConfig = Field(default_factory=ForceFieldConfig)
+    forcefield: ParametrizationConfig = Field(default_factory=ParametrizationConfig)
     solvation: SolvationConfig = Field(default_factory=SolvationConfig)
     minimization: MinimizationConfig = Field(default_factory=MinimizationConfig)
     equilibration: EquilibrationConfig = Field(default_factory=EquilibrationConfig)
@@ -166,12 +147,7 @@ class RunConfig(BaseModel):
         return ParametrizationInput(
             protein_pdb=self.system.protein,
             ligand_sdf=self.system.ligand,
-            config=ParametrizationConfig(
-                protein_ff=self.forcefield.protein_ff,
-                ligand_ff=self.forcefield.ligand_ff,
-                charge_method=self.forcefield.charge_method,
-                extra_ff_files=self.system.extra_ff_files,
-            ),
+            config=self.forcefield,
             net_charge=self.system.net_charge,
             work_dir=work_dir,
         )

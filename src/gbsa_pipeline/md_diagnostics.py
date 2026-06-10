@@ -28,9 +28,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 from gbsa_pipeline._gro_io import _GROAtom, _parse_gro
+from gbsa_pipeline._spatial import contact_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -316,16 +316,11 @@ def _find_close_contacts_pdb(
     if not protein or not solvent:
         return []
 
+    protein_coords = np.array([[r[3], r[4], r[5]] for r in protein])
     solvent_coords = np.array([[r[3], r[4], r[5]] for r in solvent])
-    tree = cKDTree(solvent_coords)
-
-    contacts = []
-    for r1 in protein:
-        hits = tree.query_ball_point([r1[3], r1[4], r1[5]], r=threshold_ang)
-        for j in hits:
-            r2 = solvent[j]
-            contacts.append((r1, r2, math.dist(r1[3:6], r2[3:6])))
-    return contacts
+    return [
+        (protein[i], solvent[j], dist) for i, j, dist in contact_pairs(protein_coords, solvent_coords, threshold_ang)
+    ]
 
 
 def _compute_displacements(

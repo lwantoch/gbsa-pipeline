@@ -6,12 +6,14 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import gemmi
+import meeko
 import numpy as np
 from rdkit import Chem
-from scipy.spatial import cKDTree
 
+from gbsa_pipeline._constants import WATER_RESIDUE_NAMES
+from gbsa_pipeline._spatial import contact_pairs
 from gbsa_pipeline.docking._models import DockingManifest, DockingValidation
-from gbsa_pipeline.docking._receptor_prep import prepare_receptor_with_crystal_waters
+from gbsa_pipeline.docking._receptor_prep import merge_pdb_structures
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -26,7 +28,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-_WATER_RESNAMES: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL"})
+_WATER_RESNAMES = WATER_RESIDUE_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -35,22 +37,18 @@ _WATER_RESNAMES: frozenset[str] = frozenset({"HOH", "WAT", "TIP3", "TIP3P", "SOL
 
 
 def _read_pdb_like(path: Path) -> gemmi.Structure:
-    """Read a PDB or PDBQT file; only the first MODEL block is kept.
-
-    Vina writes all poses into one PDBQT (MODEL 1…N). Gemmi raises on
-    duplicate model numbers when the full file is parsed, so we truncate to
-    the first ENDMDL before handing off to the parser.
-    """
-    text = path.read_text(encoding="utf-8", errors="replace")
-    endmdl = text.find("ENDMDL")
-    if endmdl != -1:
-        text = text[: endmdl + len("ENDMDL")] + "\nEND\n"
-    return gemmi.read_pdb_string(text)
+    """Read a PDB or PDBQT file into a gemmi Structure."""
+    return gemmi.read_pdb(str(path))
 
 
 def _atom_pos(atom: Any) -> np.ndarray:
     """Convert a Gemmi atom position to a (3,) numpy array."""
     return np.array([atom.pos.x, atom.pos.y, atom.pos.z])
+
+
+def _first_heavy_atom(residue: Any) -> Any | None:
+    """Return the first non-hydrogen atom in a residue, or None if all are hydrogens."""
+    return next((a for a in residue if not a.is_hydrogen()), None)
 
 
 def _pdb_heavy_atom_coords(
@@ -82,24 +80,50 @@ def _sdf_heavy_atom_coords(sdf_path: Path) -> np.ndarray:
     return np.array([list(conf.GetAtomPosition(i)) for i in range(mol.GetNumAtoms())])
 
 
+def _pdbqt_heavy_atom_coords(path: Path) -> np.ndarray:
+    """Return (N, 3) heavy-atom coordinates from the first pose of a Vina PDBQT."""
+    mol = meeko.PDBQTMolecule(path.read_text(encoding="utf-8"), poses_to_read=1)
+    atoms = mol[0].atoms()
+    heavy = atoms[[not a["name"].startswith("H") for a in atoms]]
+    return np.stack(heavy["xyz"]).astype(float) if len(heavy) else np.empty((0, 3))
+
+
 def _pose_heavy_atom_coords(pose_path: Path) -> np.ndarray:
-    """Return (N, 3) heavy-atom coordinates for a PDB/PDBQT or SDF pose file."""
-    if pose_path.suffix.lower() in (".pdb", ".pdbqt"):
+    """Return (N, 3) heavy-atom coordinates for a PDB, PDBQT, or SDF pose file."""
+    if pose_path.suffix.lower() == ".pdbqt":
+        return _pdbqt_heavy_atom_coords(pose_path)
+    if pose_path.suffix.lower() == ".pdb":
         return _pdb_heavy_atom_coords(pose_path, exclude_residues=frozenset())
     return _sdf_heavy_atom_coords(pose_path)
 
 
-def _iter_water_oxygens(pdb_path: Path) -> Iterator[tuple[str, np.ndarray]]:
-    """Yield ``(res_id, oxygen_xyz)`` for each residue with at least one non-hydrogen atom."""
+def _in_docking_box(pos: np.ndarray, box: DockingBox) -> bool:
+    """Return True if pos lies inside the docking box (boundaries inclusive)."""
+    cx, cy, cz = box.center
+    hx, hy, hz = box.size[0] / 2.0, box.size[1] / 2.0, box.size[2] / 2.0
+    return cx - hx <= pos[0] <= cx + hx and cy - hy <= pos[1] <= cy + hy and cz - hz <= pos[2] <= cz + hz
+
+
+def _write_chain_as_pdb(chain: gemmi.Chain, path: Path) -> None:
+    """Write a single gemmi Chain to a PDB file, creating parent directories."""
+    model = gemmi.Model("1")
+    model.add_chain(chain)
+    st = gemmi.Structure()
+    st.add_model(model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    st.write_pdb(str(path))
+
+
+def _iter_residue_coords(pdb_path: Path) -> Iterator[tuple[str, np.ndarray]]:
+    """Yield ``(res_id, xyz)`` of the first heavy atom for each residue in the PDB."""
     structure = _read_pdb_like(pdb_path)
     if not structure:
         return
     for chain in structure[0]:
         for residue in chain:
-            for atom in residue:
-                if not atom.is_hydrogen():
-                    yield str(residue.seqid.num), _atom_pos(atom)
-                    break
+            atom = _first_heavy_atom(residue)
+            if atom is not None:
+                yield str(residue.seqid.num), _atom_pos(atom)
 
 
 # ---------------------------------------------------------------------------
@@ -151,25 +175,22 @@ def select_docking_crystal_waters(
 
     lig_coords = _pose_heavy_atom_coords(ligand_sdf)
     rec_coords = _pdb_heavy_atom_coords(receptor_pdb)
-    lig_tree = cKDTree(lig_coords) if lig_coords.size > 0 else None
-    rec_tree = cKDTree(rec_coords) if rec_coords.size > 0 else None
-
-    cx, cy, cz = box.center
-    hx, hy, hz = box.size[0] / 2.0, box.size[1] / 2.0, box.size[2] / 2.0
 
     out_chain = gemmi.Chain("W")
     retained_ids: list[str] = []
 
     for chain in structure[0]:
         for residue in chain:
-            ow = next((_atom_pos(a) for a in residue if not a.is_hydrogen()), None)
-            if ow is None:
+            if (_ha := _first_heavy_atom(residue)) is None:
                 continue
-            if not (cx - hx <= ow[0] <= cx + hx and cy - hy <= ow[1] <= cy + hy and cz - hz <= ow[2] <= cz + hz):
+            ow = _atom_pos(_ha)
+            if not _in_docking_box(ow, box):
                 continue
-            if lig_tree is not None and not lig_tree.query_ball_point(ow, r=ligand_cutoff_angstrom):
+            if lig_coords.size > 0 and not np.any(np.linalg.norm(lig_coords - ow, axis=1) <= ligand_cutoff_angstrom):
                 continue
-            if rec_tree is not None and rec_tree.query_ball_point(ow, r=receptor_clash_cutoff_angstrom):
+            if rec_coords.size > 0 and np.any(
+                np.linalg.norm(rec_coords - ow, axis=1) <= receptor_clash_cutoff_angstrom
+            ):
                 LOGGER.debug("Crystal water %s discarded (receptor clash).", residue.seqid.num)
                 continue
             out_chain.add_residue(residue.clone())
@@ -179,15 +200,66 @@ def select_docking_crystal_waters(
         LOGGER.debug("No crystal waters survived selection.")
         return None, []
 
-    out_model = gemmi.Model("1")
-    out_model.add_chain(out_chain)
-    out_st = gemmi.Structure()
-    out_st.add_model(out_model)
-    output_pdb.parent.mkdir(parents=True, exist_ok=True)
-    out_st.write_pdb(str(output_pdb))
-
+    _write_chain_as_pdb(out_chain, output_pdb)
     LOGGER.info("Selected %d crystal waters: %s", len(retained_ids), retained_ids)
     return output_pdb, retained_ids
+
+
+def _detect_clashes(
+    lig_coords: np.ndarray,
+    rec_coords: np.ndarray,
+    water_positions: list[tuple[str, np.ndarray]],
+    *,
+    cutoff: float,
+) -> tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]:
+    """Return ``(lig_protein_clashes, lig_water_clashes, water_protein_clashes)``.
+
+    Each entry is a ``(label, distance_Å)`` pair for atom pairs within ``cutoff``.
+    """
+    lig_protein: list[tuple[str, float]] = []
+    lig_water: list[tuple[str, float]] = []
+    water_protein: list[tuple[str, float]] = []
+
+    for i, j, dist in contact_pairs(lig_coords, rec_coords, cutoff):
+        lig_protein.append((f"lig_atom{i}<->rec_atom{j}", dist))
+
+    for res_id, ow in water_positions:
+        ow_arr = ow[np.newaxis]
+        for _, j, dist in contact_pairs(ow_arr, rec_coords, cutoff):
+            water_protein.append((f"HOH{res_id}<->rec_atom{j}", dist))
+        for _, i, dist in contact_pairs(ow_arr, lig_coords, cutoff):
+            lig_water.append((f"HOH{res_id}<->lig_atom{i}", dist))
+
+    return lig_protein, lig_water, water_protein
+
+
+def _find_water_bridges(
+    water_positions: list[tuple[str, np.ndarray]],
+    lig_coords: np.ndarray,
+    rec_coords: np.ndarray,
+    *,
+    min_angstrom: float,
+    max_angstrom: float,
+) -> list[tuple[str, str, str, float, float]]:
+    """Return ``(water_id, lig_label, rec_label, d_lig, d_rec)`` for each bridge.
+
+    A bridge is a water oxygen within ``[min, max]`` Å of both a ligand and a
+    receptor heavy atom simultaneously.
+    """
+    bridges: list[tuple[str, str, str, float, float]] = []
+    if not water_positions or lig_coords.size == 0 or rec_coords.size == 0:
+        return bridges
+    for res_id, ow in water_positions:
+        lig_dists = np.linalg.norm(lig_coords - ow, axis=1)
+        rec_dists = np.linalg.norm(rec_coords - ow, axis=1)
+        lig_near = np.where((lig_dists >= min_angstrom) & (lig_dists <= max_angstrom))[0]
+        rec_near = np.where((rec_dists >= min_angstrom) & (rec_dists <= max_angstrom))[0]
+        for i in lig_near:
+            for j in rec_near:
+                bridges.append(
+                    (f"HOH{res_id}", f"lig_atom{i}", f"rec_atom{j}", float(lig_dists[i]), float(rec_dists[j]))
+                )
+    return bridges
 
 
 def validate_docked_pose(
@@ -199,47 +271,27 @@ def validate_docked_pose(
     bridge_min_angstrom: float = 2.6,
     bridge_max_angstrom: float = 3.2,
 ) -> DockingValidation:
-    """Check clashes and water bridges for a docked pose.
-
-    Uses ``cKDTree`` for all distance queries.  A "water bridge" is a crystal
-    water whose oxygen is within ``[bridge_min, bridge_max]`` Å of both a
-    ligand heavy atom and a receptor heavy atom simultaneously.
-    """
+    """Check clashes and water bridges for a docked pose."""
     lig_coords = _pose_heavy_atom_coords(pose_sdf)
     rec_coords = _pdb_heavy_atom_coords(receptor_pdb)
-    lig_tree = cKDTree(lig_coords) if lig_coords.size > 0 else None
-    rec_tree = cKDTree(rec_coords) if rec_coords.size > 0 else None
-
-    lig_protein_clashes: list[tuple[str, float]] = []
-    lig_water_clashes: list[tuple[str, float]] = []
-    water_protein_clashes: list[tuple[str, float]] = []
-    water_bridges: list[tuple[str, str, str, float, float]] = []
-
-    if lig_coords.size > 0 and rec_tree is not None:
-        for i, lpos in enumerate(lig_coords):
-            for j in rec_tree.query_ball_point(lpos, r=clash_cutoff_angstrom):
-                lig_protein_clashes.append((f"lig_atom{i}<->rec_atom{j}", float(np.linalg.norm(lpos - rec_coords[j]))))
-
-    if retained_waters_pdb is not None and retained_waters_pdb.exists():
-        for res_id, ow in _iter_water_oxygens(retained_waters_pdb):
-            if rec_tree is not None:
-                for j in rec_tree.query_ball_point(ow, r=clash_cutoff_angstrom):
-                    water_protein_clashes.append(
-                        (f"HOH{res_id}<->rec_atom{j}", float(np.linalg.norm(ow - rec_coords[j])))
-                    )
-            if lig_tree is not None:
-                for i in lig_tree.query_ball_point(ow, r=clash_cutoff_angstrom):
-                    lig_water_clashes.append((f"HOH{res_id}<->lig_atom{i}", float(np.linalg.norm(ow - lig_coords[i]))))
-            if lig_tree is not None and rec_tree is not None:
-                for i in lig_tree.query_ball_point(ow, r=bridge_max_angstrom):
-                    dl = float(np.linalg.norm(ow - lig_coords[i]))
-                    if dl < bridge_min_angstrom:
-                        continue
-                    for j in rec_tree.query_ball_point(ow, r=bridge_max_angstrom):
-                        dr = float(np.linalg.norm(ow - rec_coords[j]))
-                        if dr >= bridge_min_angstrom:
-                            water_bridges.append((f"HOH{res_id}", f"lig_atom{i}", f"rec_atom{j}", dl, dr))
-
+    water_positions = (
+        list(_iter_residue_coords(retained_waters_pdb))
+        if retained_waters_pdb is not None and retained_waters_pdb.exists()
+        else []
+    )
+    lig_protein_clashes, lig_water_clashes, water_protein_clashes = _detect_clashes(
+        lig_coords,
+        rec_coords,
+        water_positions,
+        cutoff=clash_cutoff_angstrom,
+    )
+    water_bridges = _find_water_bridges(
+        water_positions,
+        lig_coords,
+        rec_coords,
+        min_angstrom=bridge_min_angstrom,
+        max_angstrom=bridge_max_angstrom,
+    )
     return DockingValidation(
         ligand_protein_clashes=lig_protein_clashes,
         ligand_water_clashes=lig_water_clashes,
@@ -314,11 +366,16 @@ def dock_with_and_without_crystal_waters(
 
     # --- Run 2: receptor + selected crystal waters --------------------------
     receptor_with_waters = work_dir / "receptor_with_crystal_waters.pdb"
-    prepare_receptor_with_crystal_waters(request.receptor, selected_path, receptor_with_waters)
+    merge_pdb_structures(request.receptor, selected_path, receptor_with_waters)
 
     try:
         result_with_water = engine.dock(
-            request.model_copy(update={"receptor": receptor_with_waters, "workdir": work_dir / "with_water"})
+            request.model_copy(
+                update={
+                    "receptor": receptor_with_waters,
+                    "workdir": work_dir / "with_water",
+                }
+            )
         )
     # Docking backends may raise backend-specific exceptions depending on the
     # active executable, input structure, and search-space setup. This fallback

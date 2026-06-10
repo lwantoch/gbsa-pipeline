@@ -54,13 +54,15 @@ def test_docking_request_input_validates_paths(tmp_path: Path) -> None:
 
 
 def test_solvation_params_input_round_trip() -> None:
-    params = SolvationParams(
-        water_model="TIP4P",
-        padding=1.0,
-        box_size=None,
-        ion_concentration=0.0,
-        neutralize=False,
-        shape="cubic",
+    params = SolvationParams.model_validate(
+        {
+            "water_model": "TIP4P",
+            "padding": 1.0,
+            "box_size": None,
+            "ion_concentration": 0.0,
+            "neutralize": False,
+            "shape": "cubic",
+        }
     )
 
     assert params.water_model == WaterModel.TIP4P

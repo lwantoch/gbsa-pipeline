@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any
 
 import BioSimSpace as BSS
 
+from gbsa_pipeline._constants import WATER_RESIDUE_NAMES
 from gbsa_pipeline._gro_io import _update_topology_water_counts, _write_cleaned_gro
 from gbsa_pipeline.md_diagnostics import analyze_crash_frames, check_posre_consistency
 from gbsa_pipeline.mdp import GromacsParams, field_to_mdp_key, set_mdp_key
@@ -318,15 +319,12 @@ def _check_stage_posre(work_dir: Path, stage_name: str) -> None:
             )
 
 
-_GRO_WATER_RESNAMES = {"SOL", "HOH", "WAT", "TIP3", "TIP3P"}
-
-
 def remove_clashing_solvent_waters(
     system: sire.System,
     *,
     work_dir: Path,
     cutoff_angstrom: float = 1.5,
-    water_resnames: tuple[str, ...] = ("SOL", "HOH", "WAT", "TIP3", "TIP3P"),
+    water_resnames: tuple[str, ...] = tuple(WATER_RESIDUE_NAMES),
 ) -> sire.System:
     """Remove impossible bulk-solvent contacts from a solvated GROMACS system.
 

@@ -37,7 +37,7 @@ from gbsa_pipeline.docking._models import (
 )
 from gbsa_pipeline.docking._receptor_prep import (
     convert_receptor_pdb_to_pdbqt,
-    prepare_receptor_with_crystal_waters,
+    merge_pdb_structures,
 )
 from gbsa_pipeline.docking._vina import VinaEngine
 from gbsa_pipeline.mol_utils import load_first_sdf_molecule, molecule_centroid, remove_hydrogens_copy
@@ -56,9 +56,9 @@ __all__ = [
     "dock_with_and_without_crystal_waters",
     "export_pdbqt_to_sdf",
     "load_first_sdf_molecule",
+    "merge_pdb_structures",
     "molecule_centroid",
     "prepare_ligand_with_meeko",
-    "prepare_receptor_with_crystal_waters",
     "remove_hydrogens_copy",
     "select_docking_crystal_waters",
     "validate_docked_pose",
