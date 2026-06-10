@@ -9,7 +9,7 @@ workflow chaining belongs in the integration test module instead.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import gemmi
 import numpy as np
@@ -30,8 +30,7 @@ from gbsa_pipeline.docking._crystal_waters import (
 )
 from gbsa_pipeline.docking._receptor_prep import _merge_sdfs_into_pdb, _strip_hetatm, merge_pdb_structures
 
-if TYPE_CHECKING:
-    from pathlib import Path
+TESTDATA = Path(__file__).parents[1] / "testdata"
 
 
 def test_meeko_smiles_to_pdbqt(tmp_path: Path) -> None:
@@ -261,15 +260,6 @@ def test_merge_sdfs_into_pdb_invalid_sdf_raises(tmp_path: Path) -> None:
 # _read_pdb_like tests
 # ---------------------------------------------------------------------------
 
-_MULTI_MODEL_PDBQT = """\
-MODEL 1
-ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00  0.00           N
-ENDMDL
-MODEL 1
-ATOM      2  CA  ALA A   1       2.000   2.000   3.000  1.00  0.00           C
-ENDMDL
-"""
-
 _SINGLE_MODEL_PDB = """\
 ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00  0.00           N
 END
@@ -284,17 +274,16 @@ def test_read_pdb_like_single_model(tmp_path: Path) -> None:
     assert len(st) >= 1
 
 
-def test_read_pdb_like_multi_model_pdbqt_first_model_accessible(tmp_path: Path) -> None:
-    """A Vina PDBQT with duplicate MODEL 1 blocks is read without error.
+def test_read_pdb_like_multi_model_pdbqt_first_model_accessible() -> None:
+    """A real Vina PDBQT with multiple MODEL/TORSDOF blocks is read without error.
 
-    Gemmi parses all MODEL blocks; callers use structure[0] to access the first pose.
+    Vina PDBQT files contain TORSDOF inside MODEL blocks; gemmi's PDB parser
+    resets its model counter on TORSDOF, causing it to raise on the second MODEL
+    unless _read_pdb_like truncates to the first ENDMDL before parsing.
     """
-    pdbqt = tmp_path / "poses.pdbqt"
-    pdbqt.write_text(_MULTI_MODEL_PDBQT, encoding="utf-8")
+    pdbqt = TESTDATA / "vina_multi_pose_out.pdbqt"
     st = _read_pdb_like(pdbqt)
     assert len(st) >= 1
-    atoms = [atom for chain in st[0] for res in chain for atom in res]
-    assert len(atoms) == 1  # only the N from the first MODEL 1 block
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,19 @@
+{
+  "pdb_id": "3K5E",
+  "variant": "large_gap_complete",
+  "dir_id": "3K5E_large_gap_complete",
+  "protein_pdb": "/mnt/lustre/scratch/nlsas/home/otras/hcx/lwa/GPU-test/proteins/3K5E_large_gap_complete/3K5E_large_gap_complete.pdb",
+  "crystal_waters_pdb": "/mnt/lustre/scratch/nlsas/home/otras/hcx/lwa/GPU-test/proteins/3K5E_large_gap_complete/3K5E_large_gap_complete_WAT.pdb",
+  "cofactor_sdfs": [
+    "/mnt/lustre/scratch/nlsas/home/otras/hcx/lwa/GPU-test/proteins/3K5E_large_gap_complete/cofactors/ADP_A_603.sdf"
+  ],
+  "extra_ff_files": [
+    "/mnt/lustre/scratch/nlsas/home/otras/hcx/lwa/GPU-test/proteins/3K5E_large_gap_complete/cofactors/ADP_A_603.mol2",
+    "/mnt/lustre/scratch/nlsas/home/otras/hcx/lwa/GPU-test/proteins/3K5E_large_gap_complete/cofactors/ADP_A_603.frcmod"
+  ],
+  "leaprc_extra_sources": [
+    "leaprc.water.tip3p"
+  ],
+  "has_cofactors": true,
+  "has_phosaa14sb": false
+}
