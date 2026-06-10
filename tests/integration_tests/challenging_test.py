@@ -1,4 +1,4 @@
-"""Pipeline integration tests for 1F0R and 3K5E.
+"""Pipeline integration tests for 2LYZ and 3K5E.
 
 Each test runs the complete data-preparation workflow:
 docking with crystal-water selection → ligand pose export →
@@ -118,17 +118,17 @@ def _run_pipeline(
 
 
 @pytest.mark.integration
-def test_system_1f0r_docking_parametrize_solvate(tmp_path: Path) -> None:
-    """1F0R: dock with crystal-water selection, parametrize, solvate."""
+def test_system_2lyz_docking_parametrize_solvate(tmp_path: Path) -> None:
+    """2LYZ: dock with crystal-water selection, parametrize, solvate."""
     if shutil.which("vina") is None:
         pytest.skip("vina not found in PATH")
 
     _run_pipeline(
         tmp_path,
-        protein_pdb=TESTDATA / "1F0R" / "1F0R.pdb",
-        crystal_waters_pdb=TESTDATA / "1F0R" / "1F0R_WAT.pdb",
-        ligand_sdf=TESTDATA / "1F0R" / "ligands" / "ligand01.sdf",
-        box=DockingBox(center=(23.1, 13.3, 25.2), size=(35.0, 35.0, 35.0)),
+        protein_pdb=TESTDATA / "2LYZ" / "2LYZ_dry.pdb",
+        crystal_waters_pdb=TESTDATA / "2LYZ" / "2LYZ_WAT.pdb",
+        ligand_sdf=TESTDATA / "2LYZ" / "ligands" / "ligand01.sdf",
+        box=DockingBox(center=(5.4, 19.5, 24.8), size=(20.0, 20.0, 20.0)),
     )
 
 
