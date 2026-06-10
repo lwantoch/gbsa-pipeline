@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import gemmi
+import meeko
 import numpy as np
 from rdkit import Chem
 
@@ -79,9 +80,19 @@ def _sdf_heavy_atom_coords(sdf_path: Path) -> np.ndarray:
     return np.array([list(conf.GetAtomPosition(i)) for i in range(mol.GetNumAtoms())])
 
 
+def _pdbqt_heavy_atom_coords(path: Path) -> np.ndarray:
+    """Return (N, 3) heavy-atom coordinates from the first pose of a Vina PDBQT."""
+    mol = meeko.PDBQTMolecule(path.read_text(encoding="utf-8"), poses_to_read=1)
+    atoms = mol[0].atoms()
+    heavy = atoms[[not a["name"].startswith("H") for a in atoms]]
+    return np.stack(heavy["xyz"]).astype(float) if len(heavy) else np.empty((0, 3))
+
+
 def _pose_heavy_atom_coords(pose_path: Path) -> np.ndarray:
-    """Return (N, 3) heavy-atom coordinates for a PDB/PDBQT or SDF pose file."""
-    if pose_path.suffix.lower() in (".pdb", ".pdbqt"):
+    """Return (N, 3) heavy-atom coordinates for a PDB, PDBQT, or SDF pose file."""
+    if pose_path.suffix.lower() == ".pdbqt":
+        return _pdbqt_heavy_atom_coords(pose_path)
+    if pose_path.suffix.lower() == ".pdb":
         return _pdb_heavy_atom_coords(pose_path, exclude_residues=frozenset())
     return _sdf_heavy_atom_coords(pose_path)
 

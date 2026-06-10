@@ -23,6 +23,7 @@ from gbsa_pipeline.docking._crystal_waters import (
     _find_water_bridges,
     _in_docking_box,
     _iter_residue_coords,
+    _pose_heavy_atom_coords,
     _read_pdb_like,
     _write_chain_as_pdb,
     select_docking_crystal_waters,
@@ -274,16 +275,16 @@ def test_read_pdb_like_single_model(tmp_path: Path) -> None:
     assert len(st) >= 1
 
 
-def test_read_pdb_like_multi_model_pdbqt_first_model_accessible() -> None:
-    """A real Vina PDBQT with multiple MODEL/TORSDOF blocks is read without error.
+def test_pose_heavy_atom_coords_multi_pose_pdbqt() -> None:
+    """A real Vina PDBQT with multiple MODEL/TORSDOF blocks yields coords without error.
 
-    Vina PDBQT files contain TORSDOF inside MODEL blocks; gemmi's PDB parser
-    resets its model counter on TORSDOF, causing it to raise on the second MODEL
-    unless _read_pdb_like truncates to the first ENDMDL before parsing.
+    Vina PDBQT files contain TORSDOF inside MODEL blocks which confuse gemmi's
+    PDB parser. _pose_heavy_atom_coords must use meeko for .pdbqt files and
+    return only the first pose (26 heavy atoms), not all poses concatenated (52).
     """
     pdbqt = TESTDATA / "vina_multi_pose_out.pdbqt"
-    st = _read_pdb_like(pdbqt)
-    assert len(st) >= 1
+    coords = _pose_heavy_atom_coords(pdbqt)
+    assert coords.shape == (26, 3)
 
 
 # ---------------------------------------------------------------------------
