@@ -146,18 +146,11 @@ def _stage_nvt_restrained(config: RunConfig, system: Any, stage_dir: Path) -> An
     )
 
 
-def _stage_npt_restrained(config: RunConfig, system: Any, stage_dir: Path) -> Any:
-    """NPT equilibration with backbone restraints."""
-    logger.info("  %.1f ps  restraint=backbone", config.npt_equilibration.simulation_time_ps)
+def _stage_npt(config: RunConfig, system: Any, stage_dir: Path, *, restraint: str | None = None) -> Any:
+    """NPT equilibration, optionally with backbone restraints."""
+    logger.info("  %.1f ps  restraint=%s", config.npt_equilibration.simulation_time_ps, restraint or "none")
     npt_time = config.npt_equilibration.simulation_time_ps * BSS.Units.Time.picosecond
-    return run_npt_equilibration(npt_time, system, work_dir=stage_dir, restraint="backbone")
-
-
-def _stage_npt(config: RunConfig, system: Any, stage_dir: Path) -> Any:
-    """NPT equilibration without restraints."""
-    logger.info("  %.1f ps  restraint=none", config.npt_equilibration.simulation_time_ps)
-    npt_time = config.npt_equilibration.simulation_time_ps * BSS.Units.Time.picosecond
-    return run_npt_equilibration(npt_time, system, work_dir=stage_dir, restraint=None)
+    return run_npt_equilibration(npt_time, system, work_dir=stage_dir, restraint=restraint)
 
 
 def _stage_production(config: RunConfig, system: Any, stage_dir: Path) -> Any:
@@ -237,7 +230,7 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
         "npt_restrained",
         "06_npt_res",
         output_dir,
-        lambda d: _stage_npt_restrained(config, system, d),
+        lambda d: _stage_npt(config, system, d, restraint="backbone"),
     )
     system = _run_md_stage(
         "Stage 7/8: NPT Equilibration", "npt", "07_npt", output_dir, lambda d: _stage_npt(config, system, d)

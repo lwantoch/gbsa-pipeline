@@ -6,10 +6,10 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import gemmi
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, FilePath
 
 from gbsa_pipeline._constants import WATER_RESIDUE_NAMES
 from gbsa_pipeline.parametrization_enum import ChargeMethod, LigandFF, ProteinFF
@@ -45,28 +45,9 @@ class ParametrizationConfig(BaseModel):
     protein_ff: ProteinFF = ProteinFF.FF14SB
     ligand_ff: LigandFF = LigandFF.GAFF2
     charge_method: ChargeMethod = ChargeMethod.AM1BCC
-    extra_ff_files: tuple[Path, ...] = ()
-    mcpb_tleap_in: Path | None = None
+    extra_ff_files: tuple[FilePath, ...] = ()
+    mcpb_tleap_in: FilePath | None = None
     leaprc_extra_sources: tuple[str, ...] = ()
-
-    @field_validator("extra_ff_files", mode="before")
-    @classmethod
-    def _check_extra_ff_files(cls, paths: Any) -> tuple[Path, ...]:
-        result = tuple(Path(p) for p in paths)
-        missing = [p for p in result if not p.exists()]
-        if missing:
-            raise ValueError("Extra force field files not found: " + ", ".join(str(p) for p in missing))
-        return result
-
-    @field_validator("mcpb_tleap_in", mode="before")
-    @classmethod
-    def _check_mcpb_tleap_in(cls, v: Any) -> Path | None:
-        if v is None:
-            return None
-        p = Path(v)
-        if not p.exists():
-            raise ValueError(f"MCPB.py tleap.in not found: {p}")
-        return p
 
     # ------------------------------------------------------------------
     # Named presets
@@ -119,28 +100,12 @@ class ParametrizationInput(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True)
 
-    protein_pdb: Path
-    ligand_sdf: Path
-    cofactor_sdfs: tuple[Path, ...] = ()
+    protein_pdb: FilePath
+    ligand_sdf: FilePath
+    cofactor_sdfs: tuple[FilePath, ...] = ()
     config: ParametrizationConfig = Field(default_factory=ParametrizationConfig)
     net_charge: int | None = None
     work_dir: Path | None = None
-
-    @field_validator("protein_pdb", "ligand_sdf")
-    @classmethod
-    def _check_exists(cls, path: Path) -> Path:
-        if not path.exists():
-            raise ValueError(f"File not found: {path}")
-        return path
-
-    @field_validator("cofactor_sdfs", mode="before")
-    @classmethod
-    def _check_cofactor_sdfs(cls, paths: Any) -> tuple[Path, ...]:
-        result = tuple(Path(p) for p in paths)
-        missing = [p for p in result if not p.exists()]
-        if missing:
-            raise ValueError("Cofactor SDF files not found: " + ", ".join(str(p) for p in missing))
-        return result
 
 
 # ---------------------------------------------------------------------------

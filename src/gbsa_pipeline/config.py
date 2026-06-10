@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import (
-    Path,  # noqa: TC003 — Pydantic needs Path at runtime to resolve field types
-)
+from pathlib import Path
 from typing import Any
 
 import tomllib
