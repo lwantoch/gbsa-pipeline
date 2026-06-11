@@ -185,15 +185,27 @@ def _gro_heavy_atom_coords(gro: Path) -> list[tuple[float, float, float]]:
     return coords
 
 
-def _filter_clashing_het(norm_pdb: Path, complex_gro: Path, cutoff_a: float = 2.0) -> tuple[int, int]:
-    """Drop crystal-HET residues that clash with the protein+ligand complex.
+def _filter_clashing_het(
+    norm_pdb: Path, complex_gro: Path, cutoff_a: float = 2.0, keep_shell_a: float = 5.0
+) -> tuple[int, int]:
+    """Keep only crystal-HET residues in the modeled unit's hydration shell.
 
-    Crystal waters/ions come from a structure that did not contain the docked
-    ligand, so some overlap the docked pose. Re-inserting an overlapping water
-    yields a near-zero interatomic distance and an essentially infinite LJ
-    energy that crashes minimization. This removes any HET residue with an atom
-    within ``cutoff_a`` of a complex heavy atom (rewriting ``norm_pdb`` in
-    place) and returns the ``(n_dropped_residues, n_dropped_atoms)`` count.
+    Crystal waters/ions are re-inserted from the apo/holo structure, which both
+    (a) did not contain the docked ligand and (b) for oligomers contains waters
+    belonging to the OTHER chain(s) / bulk region we don't model. Two failure
+    modes follow:
+
+    * A water that overlaps the docked complex (< ``cutoff_a``) gives a
+      near-zero interatomic distance and ~infinite LJ energy that crashes
+      minimization at step 0.
+    * An ORPHAN water far from the modeled unit (> ``keep_shell_a`` from any
+      complex atom) sits out in what becomes bulk solvent, where ``gmx
+      solvate``/``genion`` can place a counter-ion at the same spot -> a
+      coincident ion/water pair that also crashes minimization.
+
+    So keep a HET residue only when its closest atom is within
+    ``[cutoff_a, keep_shell_a]`` of a complex heavy atom (the real hydration
+    shell). Rewrites ``norm_pdb`` in place; returns ``(n_clashing, n_orphan)``.
     Requires numpy; if the complex coords can't be read, nothing is dropped.
     """
     try:
@@ -222,8 +234,9 @@ def _filter_clashing_het(norm_pdb: Path, complex_gro: Path, cutoff_a: float = 2.
         residues[key].append(line)
 
     kept: list[str] = []
-    dropped_res = dropped_atoms = 0
+    n_clash = n_orphan = 0
     cutoff2 = cutoff_a * cutoff_a
+    shell2 = keep_shell_a * keep_shell_a
     for key in order:
         atoms = residues[key]
         xyz = np.asarray(
@@ -232,18 +245,21 @@ def _filter_clashing_het(norm_pdb: Path, complex_gro: Path, cutoff_a: float = 2.
         # min squared distance from any residue atom to any complex heavy atom
         d2 = ((xyz[:, None, :] - comp[None, :, :]) ** 2).sum(-1).min()
         if d2 < cutoff2:
-            dropped_res += 1
-            dropped_atoms += len(atoms)
+            n_clash += 1
+        elif d2 > shell2:
+            n_orphan += 1
         else:
             kept.extend(atoms)
 
-    if dropped_res:
+    n_dropped = n_clash + n_orphan
+    if n_dropped:
         norm_pdb.write_text("".join(kept) + "TER\nEND\n")
         logger.info(
-            "Crystal-HET clash filter: dropped %d residues (%d atoms) within %.1f A of the complex.",
-            dropped_res, dropped_atoms, cutoff_a,
+            "Crystal-HET filter: dropped %d clashing (<%.1f A) + %d orphan (>%.1f A from complex); "
+            "kept %d of %d residues.",
+            n_clash, cutoff_a, n_orphan, keep_shell_a, len(order) - n_dropped, len(order),
         )
-    return (dropped_res, dropped_atoms)
+    return (n_clash, n_orphan)
 
 
 def _load_crystal_het(pdb: Path, work_dir: Path, complex_gro: Path | None = None) -> list[Any]:
