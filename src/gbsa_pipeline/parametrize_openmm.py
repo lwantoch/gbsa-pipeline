@@ -174,9 +174,21 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
 
     logger.debug("Combining protein+ligand topology …")
     modeller = Modeller(protein_modeller.topology, protein_modeller.positions)
-    modeller.add(ligand.to_topology().to_openmm(), ligand.conformers[0].to_openmm())
-    for cof in cofactors:
-        modeller.add(cof.to_topology().to_openmm(), cof.conformers[0].to_openmm())
+    # OpenFF names every small-molecule residue "UNK". With a cofactor present,
+    # the ligand and cofactor would then share the residue name "UNK" and ParmEd
+    # collapses them into a single GROMACS moleculetype ("UNK 2"), producing a
+    # topology whose atom count no longer matches the coordinates. Give the
+    # ligand and each cofactor distinct residue names so they export as separate
+    # moleculetypes.
+    lig_top = ligand.to_topology().to_openmm()
+    for _res in lig_top.residues():
+        _res.name = "LIG"
+    modeller.add(lig_top, ligand.conformers[0].to_openmm())
+    for _i, cof in enumerate(cofactors):
+        cof_top = cof.to_topology().to_openmm()
+        for _res in cof_top.residues():
+            _res.name = f"CO{_i}"
+        modeller.add(cof_top, cof.conformers[0].to_openmm())
     logger.debug("Combined dry topology: %d atoms.", modeller.topology.getNumAtoms())
 
     logger.debug("Creating OpenMM system (may take a moment) …")
