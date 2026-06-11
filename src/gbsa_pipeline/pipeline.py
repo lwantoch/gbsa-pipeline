@@ -119,7 +119,11 @@ def _stage_minimize_sd(config: RunConfig, system: Any, stage_dir: Path) -> Any:
     return run_minimization(
         system,
         work_dir=stage_dir,
-        params={"nsteps": config.minimization.nsteps, "emtol": config.minimization.emtol},
+        # integrator=steep is REQUIRED: without it, GromacsParams.from_mapping()
+        # back-fills the default integrator (leap-frog "md"), which overwrites the
+        # steep integrator from BSS.Protocol.Minimisation() and turns this stage
+        # into MD instead of minimization.
+        params={"integrator": "steep", "nsteps": config.minimization.nsteps, "emtol": config.minimization.emtol},
     )
 
 
