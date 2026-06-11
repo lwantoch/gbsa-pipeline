@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
@@ -81,7 +82,17 @@ def _stage_parametrize(config: RunConfig, stage_dir: Path) -> ParametrisedComple
         config.forcefield.ligand_ff,
         config.forcefield.charge_method,
     )
-    return parametrize(config.to_parametrization_input(stage_dir))
+    parametrized = parametrize(config.to_parametrization_input(stage_dir))
+    # The complex is parametrized DRY. If the config supplies a crystal-waters
+    # PDB (e.g. the DEKOIS <PDB>_WAT.pdb), attach it so solvation re-inserts
+    # those waters as TIP3P before adding bulk water. parametrize() only
+    # extracts waters from the protein PDB, which is dry here, so set it
+    # explicitly (frozen dataclass -> replace).
+    if config.system.crystal_waters is not None:
+        parametrized = dataclasses.replace(
+            parametrized, crystal_waters_pdb=config.system.crystal_waters
+        )
+    return parametrized
 
 
 def _stage_solvate(
@@ -211,6 +222,18 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
     logger.info("─── Stage 2/8: Solvation ───")
     sol_dir = output_dir / "02_solvated"
     system = _run_stage("solvation", lambda: _stage_solvate(config, parametrized, sol_dir))
+
+    # Remove impossible water/ligand (and water/protein) contacts BEFORE SD.
+    # Solvation (and any re-inserted crystal waters) can place a water in van
+    # der Waals overlap with the docked ligand or a side chain; left in place it
+    # survives minimization and later makes SETTLE fail ("water cannot be
+    # settled") during constrained dynamics. Whole clashing waters are dropped.
+    system = _run_stage(
+        "declash",
+        lambda: remove_clashing_solvent_waters(
+            system, work_dir=sol_dir / "declash", cutoff_angstrom=1.5
+        ),
+    )
 
     system = _run_md_stage(
         "Stage 3/8: SD Minimization",

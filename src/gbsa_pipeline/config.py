@@ -20,6 +20,7 @@ class SystemConfig(BaseModel):
 
     protein: Path
     ligand: Path | None = None
+    crystal_waters: Path | None = None
     net_charge: int | None = None
 
 
