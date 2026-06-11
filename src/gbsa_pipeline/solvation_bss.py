@@ -71,7 +71,9 @@ def solvate_bss(
     # Re-insert crystallographic waters BEFORE bulk solvation (AMBER/GROMACS
     # path, no OpenMM). BSS.Solvent then fills bulk water + ions around them.
     if parametrized.crystal_waters_pdb is not None and parametrized.crystal_waters_pdb.exists():
-        het_mols = _load_crystal_het(parametrized.crystal_waters_pdb, work_dir)
+        het_mols = _load_crystal_het(
+            parametrized.crystal_waters_pdb, work_dir, complex_gro=parametrized.gro_file
+        )
         if het_mols:
             n_before = system.nMolecules()
             for mol in het_mols:
@@ -159,7 +161,92 @@ def _normalize_crystal_het(src: Path, dst: Path) -> tuple[int, int]:
     return n_waters, n_ions
 
 
-def _load_crystal_het(pdb: Path, work_dir: Path) -> list[Any]:
+def _gro_heavy_atom_coords(gro: Path) -> list[tuple[float, float, float]]:
+    """Heavy-atom (non-H) coordinates from a GRO file, in Angstrom."""
+    coords: list[tuple[float, float, float]] = []
+    lines = gro.read_text().splitlines()
+    try:
+        natoms = int(lines[1])
+    except (IndexError, ValueError):
+        return coords
+    for line in lines[2 : 2 + natoms]:
+        name = line[10:15].strip()
+        # element guess: first alphabetic char of the atom name
+        sym = next((c for c in name if c.isalpha()), "")
+        if sym.upper() == "H":
+            continue
+        try:
+            x = float(line[20:28]) * 10.0
+            y = float(line[28:36]) * 10.0
+            z = float(line[36:44]) * 10.0
+        except ValueError:
+            continue
+        coords.append((x, y, z))
+    return coords
+
+
+def _filter_clashing_het(norm_pdb: Path, complex_gro: Path, cutoff_a: float = 2.0) -> tuple[int, int]:
+    """Drop crystal-HET residues that clash with the protein+ligand complex.
+
+    Crystal waters/ions come from a structure that did not contain the docked
+    ligand, so some overlap the docked pose. Re-inserting an overlapping water
+    yields a near-zero interatomic distance and an essentially infinite LJ
+    energy that crashes minimization. This removes any HET residue with an atom
+    within ``cutoff_a`` of a complex heavy atom (rewriting ``norm_pdb`` in
+    place) and returns the ``(n_dropped_residues, n_dropped_atoms)`` count.
+    Requires numpy; if the complex coords can't be read, nothing is dropped.
+    """
+    try:
+        import numpy as np  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return (0, 0)
+
+    complex_coords = _gro_heavy_atom_coords(complex_gro)
+    if not complex_coords:
+        logger.warning("Could not read complex coords from %s; skipping HET clash filter.", complex_gro)
+        return (0, 0)
+    comp = np.asarray(complex_coords, dtype=float)
+
+    # Group HET atom lines by residue (resSeq), keeping original line order.
+    # The normalized PDB contains only ATOM/HETATM lines plus a trailing
+    # TER/END, which we regenerate; non-atom lines are ignored.
+    residues: dict[str, list[str]] = {}
+    order: list[str] = []
+    for line in norm_pdb.read_text().splitlines(keepends=True):
+        if line[:6] not in ("ATOM  ", "HETATM"):
+            continue
+        key = line[22:26]
+        if key not in residues:
+            residues[key] = []
+            order.append(key)
+        residues[key].append(line)
+
+    kept: list[str] = []
+    dropped_res = dropped_atoms = 0
+    cutoff2 = cutoff_a * cutoff_a
+    for key in order:
+        atoms = residues[key]
+        xyz = np.asarray(
+            [(float(a[30:38]), float(a[38:46]), float(a[46:54])) for a in atoms], dtype=float
+        )
+        # min squared distance from any residue atom to any complex heavy atom
+        d2 = ((xyz[:, None, :] - comp[None, :, :]) ** 2).sum(-1).min()
+        if d2 < cutoff2:
+            dropped_res += 1
+            dropped_atoms += len(atoms)
+        else:
+            kept.extend(atoms)
+
+    if dropped_res:
+        norm_pdb.write_text("".join(kept) + "TER\nEND\n")
+        logger.info(
+            "Crystal-HET clash filter: dropped %d residues (%d atoms) within %.1f A of the complex.",
+            dropped_res, dropped_atoms, cutoff_a,
+        )
+    return (dropped_res, dropped_atoms)
+
+
+def _load_crystal_het(pdb: Path, work_dir: Path, complex_gro: Path | None = None) -> list[Any]:
     """Parametrize crystal waters (TIP3P) and monatomic ions (Li-Merz 12-6-4).
 
     Normalizes the input (waters -> AMBER ``WAT``; monatomic ions kept) then
@@ -184,6 +271,12 @@ def _load_crystal_het(pdb: Path, work_dir: Path) -> list[Any]:
     if n_waters == 0 and n_ions == 0:
         logger.warning("No crystal waters/ions found in %s; skipping re-insertion.", pdb)
         return []
+
+    # Drop any crystal water/ion that overlaps the docked protein+ligand complex
+    # (the ligand was absent in the crystal, so some waters land on top of it →
+    # ~infinite LJ energy that crashes minimization).
+    if complex_gro is not None and Path(complex_gro).exists():
+        _filter_clashing_het(norm, Path(complex_gro), cutoff_a=2.0)
 
     loaded = BSS.IO.readMolecules([str(norm)])
     parametrized: list[Any] = []
