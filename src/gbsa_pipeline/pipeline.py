@@ -247,9 +247,20 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
         output_dir,
         lambda d: _stage_minimize_sd(config, system, d),
     )
-    system = _run_md_stage(
-        "Stage 4/8: CG Minimization", "cg_minimization", "04_cg", output_dir, lambda d: _stage_minimize_cg(system, d)
-    )
+    # CG is an OPTIONAL refinement on top of SD. GROMACS' cg integrator can
+    # diverge/crash on some systems; SD is robust and already produced a valid
+    # minimum. So if CG fails, log it and carry the SD-minimized system forward.
+    sd_system = system
+    try:
+        system = _run_md_stage(
+            "Stage 4/8: CG Minimization", "cg_minimization", "04_cg", output_dir,
+            lambda d: _stage_minimize_cg(system, d),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "CG minimization failed (%s); proceeding with the SD-minimized system.", exc
+        )
+        system = sd_system
     system = _run_md_stage(
         "Stage 5/8: NVT Restrained Heating",
         "nvt_restrained",
