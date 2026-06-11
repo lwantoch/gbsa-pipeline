@@ -57,6 +57,7 @@ starts from a minimized structure with no prior velocities.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -445,7 +446,13 @@ def _run_bss_protocol(
     # not reach the default 15-minute checkpoint interval before BSS kills it,
     # leaving no checkpoint file for the next stage to read velocities from.
     # Writing every minute ensures a recent checkpoint always exists.
-    extra_args: dict[str, str] = {"-ntmpi": "1", "-ntomp": "12", "-cpt": "1"}
+    # Match -ntomp to the Slurm allocation (cpus-per-task) rather than a
+    # hardcoded 12. On the 4/8-core GPU/CPU nodes, -ntomp 12 oversubscribes the
+    # cores ("will not pin threads"), which both wastes performance and has been
+    # observed to cause intermittent silent gmx mdrun crashes during
+    # minimization. Fall back to 8 when not running under Slurm.
+    _ntomp = os.environ.get("SLURM_CPUS_PER_TASK") or "8"
+    extra_args: dict[str, str] = {"-ntmpi": "1", "-ntomp": _ntomp, "-cpt": "1"}
 
     kwargs: dict[str, object] = {
         "ignore_warnings": ignore_warnings,
