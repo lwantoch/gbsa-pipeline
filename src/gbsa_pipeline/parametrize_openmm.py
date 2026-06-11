@@ -128,26 +128,17 @@ def _parametrize_openmm(inp: ParametrizationInput) -> ParametrisedComplex:
             cof.n_atoms,
             len(cof.conformers),
         )
-        logger.debug(
-            "Assigning partial charges to cofactor (method=%s) …",
-            inp.config.charge_method.value,
+        # Cofactors are parametrized like the ligand (GAFF2) but their charges
+        # are assigned with NAGL (graph-neural-net), NEVER AM1-BCC. Cofactors
+        # (ADP, NAD, FAD, ...) are large and/or highly charged, and AM1-BCC's
+        # sqm geometry optimization stalls or crashes on exactly such molecules
+        # (the failure first seen on a strained 1A5H ligand). NAGL needs no QM
+        # step, so it is both fast and robust here.
+        logger.info(
+            "Assigning cofactor partial charges via NAGL (GNN; AM1-BCC sqm is "
+            "avoided for large/charged cofactors) …"
         )
-        try:
-            cof.assign_partial_charges(
-                partial_charge_method=inp.config.charge_method.value,
-                normalize_partial_charges=True,
-                use_conformers=cof.conformers,
-            )
-        # OpenFF charge assignment can fail with toolkit/backend-specific exceptions;
-        # this fallback deliberately catches the broad failure and tries NAGL directly.
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Cofactor charge assignment failed with %s (%s); falling back to NAGL direct API.",
-                inp.config.charge_method.value,
-                exc,
-            )
-            _assign_nagl_charges_direct(cof)
-            logger.info("Cofactor charges assigned via NAGL fallback.")
+        _assign_nagl_charges_direct(cof)
         cofactors.append(cof)
     if cofactors:
         logger.debug("Loaded and parametrized %d cofactor(s).", len(cofactors))
