@@ -147,7 +147,12 @@ def _stage_nvt_restrained(config: RunConfig, system: Any, stage_dir: Path) -> An
     """Water clash removal → short solvent relax → NVT heating 50→300 K with backbone restraints."""
     logger.info("  NVT heating over %.1f ps", config.equilibration.simulation_time_ps)
 
-    system = remove_clashing_solvent_waters(system, work_dir=stage_dir / "water_cleanup")
+    # Only prune BULK solvent (SOL); never the crystallographic waters/ions,
+    # which are bundled in the 'crystal_het' molecule (resname WAT) and would
+    # corrupt the topology if a single residue were removed from them.
+    system = remove_clashing_solvent_waters(
+        system, work_dir=stage_dir / "water_cleanup", water_resnames=("SOL",)
+    )
     system = run_solvent_relaxation(system, work_dir=stage_dir / "solvent_relax")
 
     equil_time = config.equilibration.simulation_time_ps * BSS.Units.Time.picosecond
@@ -231,7 +236,7 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
     system = _run_stage(
         "declash",
         lambda: remove_clashing_solvent_waters(
-            system, work_dir=sol_dir / "declash", cutoff_angstrom=1.5
+            system, work_dir=sol_dir / "declash", cutoff_angstrom=1.5, water_resnames=("SOL",)
         ),
     )
 
