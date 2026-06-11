@@ -21,6 +21,10 @@ class SystemConfig(BaseModel):
     protein: Path
     ligand: Path | None = None
     crystal_waters: Path | None = None
+    # Optional cofactor SDFs (e.g. ADP). Parametrized the SAME way as the ligand
+    # (GAFF2 + AM1-BCC via the OpenMM path) and included in the complex. Empty
+    # = no cofactors.
+    cofactors: tuple[Path, ...] = ()
     net_charge: int | None = None
 
 
@@ -148,6 +152,7 @@ class RunConfig(BaseModel):
         return ParametrizationInput(
             protein_pdb=self.system.protein,
             ligand_sdf=self.system.ligand,
+            cofactor_sdfs=tuple(self.system.cofactors),
             config=self.forcefield,
             net_charge=self.system.net_charge,
             work_dir=work_dir,
