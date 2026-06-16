@@ -37,6 +37,7 @@ TESTDATA = Path(__file__).parents[1] / "testdata"
 DOCKING_TESTDATA = TESTDATA / "docking"
 DOCKLIGAND_SDF = DOCKING_TESTDATA / "dockligand.sdf"
 DOCKPROTEIN_PDB = DOCKING_TESTDATA / "dockprotein.pdb"
+NON_STANDARD_RECEPTOR_PDB = TESTDATA / "pdbqt" / "3OLL_no_altloc.pdb"
 
 DOCKPROTEIN_BOX = DockingBox(
     center=(10.115, 39.148, 53.112),
@@ -171,6 +172,32 @@ def test_meeko_receptor_pdb_to_pdbqt(tmp_path: Path) -> None:
 
     path = convert_receptor_pdb_to_pdbqt(
         DOCKPROTEIN_PDB,
+        output_path=output,
+    )
+
+    assert path == output
+    assert output.exists()
+    _assert_basic_receptor_pdbqt_content(output)
+
+
+@pytest.mark.integration
+def test_non_standard_aa_converts_to_pdbqt(tmp_path: Path) -> None:
+    """A receptor with a non-standard residue converts to PDBQT.
+
+    3OLL carries PTR (O-phosphotyrosine), a MODRES non-standard residue that the
+    previous set_template/CYX-retry receptor-prep path could not convert. The
+    direct Gasteiger ``Polymer.from_pdb_string`` path handles it; this guards
+    against a regression to the old behaviour.
+    The `tmp_path` parameter is required because Meeko writes runtime artifacts
+    and the test should not modify repository fixtures.
+    """
+    if not NON_STANDARD_RECEPTOR_PDB.exists():
+        pytest.skip(f"missing receptor test file: {NON_STANDARD_RECEPTOR_PDB}")
+
+    output = tmp_path / "3OLL.pdbqt"
+
+    path = convert_receptor_pdb_to_pdbqt(
+        NON_STANDARD_RECEPTOR_PDB,
         output_path=output,
     )
 
