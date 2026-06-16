@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 import gemmi
+from meeko import (
+    MoleculePreparation,
+    PDBQTWriterLegacy,
+    Polymer,
+    PolymerCreationError,
+    ResidueChemTemplates,
+)
 from rdkit import Chem
 
 from gbsa_pipeline.docking._utils import _require_file
@@ -54,23 +60,6 @@ def _merge_sdfs_into_pdb(pdb: Path, sdfs: list[Path], output: Path) -> Path:
     return output
 
 
-def _build_polymer(pdb_string: str, set_template: dict[str, str]) -> object:
-    """Build a Meeko Polymer from a PDB string, applying set_template overrides."""
-    from meeko import (  # noqa: PLC0415
-        MoleculePreparation,
-        Polymer,
-        PolymerCreationError,
-        ResidueChemTemplates,
-    )
-
-    mk_prep = MoleculePreparation.from_config({})
-    templates = ResidueChemTemplates.create_from_defaults()
-    try:
-        return Polymer.from_pdb_string(pdb_string, templates, mk_prep, set_template, residues_to_delete=[])
-    except PolymerCreationError as exc:
-        raise RuntimeError(f"Meeko could not build polymer from PDB: {exc}") from exc
-
-
 def convert_receptor_pdb_to_pdbqt(
     receptor_pdb: Path,
     output_path: Path | None = None,
@@ -79,15 +68,12 @@ def convert_receptor_pdb_to_pdbqt(
 ) -> Path:
     """Convert a receptor PDB to rigid receptor PDBQT using the Meeko Python API.
 
+    The polymer is built directly from the PDB string with Gasteiger charges
+    (the approach validated against non-standard-residue receptors such as
+    3OLL, which the previous set_template/CYX-retry path could not convert).
     Receptor hydrogen addition, protonation-state decisions, and structural
     cleanup are expected to happen upstream (e.g. in stack_protein_prep).
-
-    Cross-chain disulfide bonds (CYX) are detected automatically: if Meeko
-    raises a paddings RuntimeError, the residues flagged as having excess
-    inter-residue bonds are retried as CYX.
     """
-    from meeko import PDBQTWriterLegacy  # noqa: PLC0415
-
     receptor_pdb = _require_file(Path(receptor_pdb), "Receptor PDB")
 
     if receptor_pdb.suffix.lower() != ".pdb":
@@ -119,38 +105,12 @@ def convert_receptor_pdb_to_pdbqt(
 
     LOGGER.info("Preparing receptor with Meeko Python API: %s → %s", receptor_pdb.name, output_path.name)
 
-    # Capture meeko polymer warnings so we can extract CYX residues if the
-    # paddings check fails (cross-chain disulfide bonds not in the CYS template).
-    _meeko_warnings: list[str] = []
-
-    class _WarningCapture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            _meeko_warnings.append(record.getMessage())
-
-    _handler = _WarningCapture()
-    _meeko_logger = logging.getLogger("meeko")
-    _meeko_logger.addHandler(_handler)
-
+    templates = ResidueChemTemplates.create_from_defaults()
+    mk_prep = MoleculePreparation.from_config({"charge_model": "gasteiger"})
     try:
-        polymer = _build_polymer(pdb_string, set_template={})
-    except RuntimeError as exc:
-        if "paddings" not in str(exc):
-            raise
-        # Identify the CYS residues with excess inter-residue bonds from logged warnings.
-        residues = re.findall(
-            r"matched with excess inter-residue bond\(s\): (\S+)",
-            "\n".join(_meeko_warnings),
-        )
-        if not residues:
-            raise
-        set_template = dict.fromkeys(residues, "CYX")
-        LOGGER.warning(
-            "Meeko: cross-chain CYS bonds detected (%s), retrying with CYX template.",
-            ", ".join(residues),
-        )
-        polymer = _build_polymer(pdb_string, set_template=set_template)
-    finally:
-        _meeko_logger.removeHandler(_handler)
+        polymer = Polymer.from_pdb_string(pdb_string, templates, mk_prep)
+    except PolymerCreationError as exc:
+        raise RuntimeError(f"Meeko could not build polymer from PDB: {exc}") from exc
 
     pdbqt_string, _flex = PDBQTWriterLegacy.write_from_polymer(polymer)
 
