@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import tomllib
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, FilePath, model_validator
 
 from gbsa_pipeline.mdp import GromacsParams
 from gbsa_pipeline.parametrization import ParametrizationConfig, ParametrizationInput
@@ -14,13 +14,37 @@ from gbsa_pipeline.solvation_box import BoxShape, SolvationParams
 
 
 class SystemConfig(BaseModel):
-    """[system] section — input files and charge settings."""
+    """[system] section — input files and charge settings.
+
+    Mutually exclusive with [membrane_system]: use this section for the
+    normal path where the pipeline parametrizes a bare protein (+ ligand)
+    itself; use [membrane_system] when the input is already a complete,
+    solvated protein-in-bilayer system (e.g. from
+    gbsa_pipeline.membrane.fetch_memprotmd_system) that only needs
+    minimization/equilibration/production, not parametrization or solvation.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     protein: Path
     ligand: Path | None = None
     net_charge: int | None = None
+
+
+class MembraneSystemConfig(BaseModel):
+    """[membrane_system] section — start from a pre-built protein-in-bilayer system.
+
+    Structure/topology are already a complete, solvated GROMACS system (e.g.
+    MemProtMD's atomistic output — see gbsa_pipeline.membrane), so setting
+    this skips the parametrize and solvate stages entirely: the pipeline
+    loads structure/topology directly and starts at SD minimization.
+    Mutually exclusive with [system] — see RunConfig._validate_system_source.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    structure: FilePath  # .pdb or .gro
+    topology: FilePath  # .top
 
 
 class SolvationConfig(SolvationParams):
@@ -68,6 +92,11 @@ class RunConfig(BaseModel):
     5. NVT restrained heating  6. NPT restrained  7. NPT unrestrained
     8. Production MD
 
+    Stages 1-2 are skipped when [membrane_system] is set instead of [system]
+    (see MembraneSystemConfig): the structure/topology are already a
+    complete, solvated system, so the pipeline loads them directly and starts
+    at stage 3.
+
     Example:
     -------
     ```toml
@@ -91,17 +120,37 @@ class RunConfig(BaseModel):
     tcoupl = "v-rescale"
     ref_t = 300.0
     ```
+
+    A membrane-protein run replaces [system] with [membrane_system] and
+    switches the barostat to semiisotropic — see docs/configuration.md and
+    examples/membrane_1py6.toml for a complete worked example.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    system: SystemConfig
+    system: SystemConfig | None = None
+    membrane_system: MembraneSystemConfig | None = None
     forcefield: ParametrizationConfig = Field(default_factory=ParametrizationConfig)
     solvation: SolvationConfig = Field(default_factory=SolvationConfig)
     minimization: MinimizationConfig = Field(default_factory=MinimizationConfig)
     equilibration: EquilibrationConfig = Field(default_factory=EquilibrationConfig)
     npt_equilibration: NptConfig = Field(default_factory=NptConfig)
     md: GromacsParams = Field(default_factory=GromacsParams)
+
+    @model_validator(mode="after")
+    def _validate_system_source(self) -> Self:
+        """Require exactly one of [system] or [membrane_system].
+
+        [system] is the normal path: a bare protein (+ ligand) this pipeline
+        parametrizes and solvates itself. [membrane_system] is for an
+        already-complete, already-solvated protein-in-bilayer system (e.g.
+        MemProtMD output) that skips straight to minimization. Requiring
+        exactly one avoids a config that silently ignores whichever section
+        it doesn't end up using.
+        """
+        if (self.system is None) == (self.membrane_system is None):
+            raise ValueError("Exactly one of [system] or [membrane_system] must be set.")
+        return self
 
     @classmethod
     def from_toml(cls, path: Path) -> RunConfig:
@@ -137,8 +186,15 @@ class RunConfig(BaseModel):
         Raises:
         ------
         ValueError
-            If ``system.ligand`` is ``None`` (ligand is required for parametrization).
+            If ``system`` is ``None`` (this is a [membrane_system] run — there
+            is nothing to parametrize) or ``system.ligand`` is ``None``
+            (ligand is required for parametrization).
         """
+        if self.system is None:
+            raise ValueError(
+                "to_parametrization_input() requires [system]; this config uses [membrane_system], "
+                "which skips parametrization entirely (see RunConfig docstring)."
+            )
         if self.system.ligand is None:
             raise ValueError(
                 "system.ligand must be set to run the parametrization stage. "

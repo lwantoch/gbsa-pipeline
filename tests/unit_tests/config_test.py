@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from gbsa_pipeline.cli import main as cli_main
 from gbsa_pipeline.config import (
+    MembraneSystemConfig,
     RunConfig,
     SolvationConfig,
     SystemConfig,
@@ -58,6 +59,7 @@ def test_from_toml_minimal(tmp_path: Path) -> None:
 
     cfg = RunConfig.from_toml(toml)
 
+    assert cfg.system is not None
     assert cfg.system.protein == protein
     assert cfg.system.ligand is None
     assert cfg.forcefield.protein_ff == ProteinFF.FF14SB
@@ -107,6 +109,7 @@ def test_from_toml_full(tmp_path: Path) -> None:
 
     cfg = RunConfig.from_toml(toml)
 
+    assert cfg.system is not None
     assert cfg.system.ligand == ligand
     assert cfg.system.net_charge == -1
     assert cfg.forcefield.protein_ff == ProteinFF.FF19SB
@@ -147,6 +150,79 @@ def test_from_toml_system_protein_required(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="protein"):
         RunConfig.from_toml(toml)
+
+
+# ---------------------------------------------------------------------------
+# [membrane_system] -- pre-built protein-in-bilayer systems (e.g. MemProtMD)
+# ---------------------------------------------------------------------------
+
+
+def test_from_toml_membrane_system(tmp_path: Path) -> None:
+    """[membrane_system] loads instead of [system], with [system] left unset."""
+    structure = tmp_path / "atomistic-system.pdb"
+    topology = tmp_path / "topol.top"
+    structure.write_text("", encoding="utf-8")
+    topology.write_text("", encoding="utf-8")
+    toml = _write_toml(
+        tmp_path,
+        f"""
+        [membrane_system]
+        structure = "{structure}"
+        topology  = "{topology}"
+        """,
+    )
+
+    cfg = RunConfig.from_toml(toml)
+
+    assert cfg.system is None
+    assert cfg.membrane_system is not None
+    assert cfg.membrane_system.structure == structure
+    assert cfg.membrane_system.topology == topology
+
+
+def test_from_toml_requires_system_or_membrane_system(tmp_path: Path) -> None:
+    """Neither [system] nor [membrane_system] set is rejected, not silently defaulted."""
+    toml = _write_toml(tmp_path, "")
+
+    with pytest.raises(ValidationError, match="Exactly one of"):
+        RunConfig.from_toml(toml)
+
+
+def test_run_config_rejects_both_system_and_membrane_system(tmp_path: Path) -> None:
+    """[system] and [membrane_system] together are rejected as ambiguous."""
+    protein = tmp_path / "protein.pdb"
+    structure = tmp_path / "atomistic-system.pdb"
+    topology = tmp_path / "topol.top"
+    for f in (protein, structure, topology):
+        f.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="Exactly one of"):
+        RunConfig(
+            system=SystemConfig(protein=protein),
+            membrane_system=MembraneSystemConfig(structure=structure, topology=topology),
+        )
+
+
+def test_membrane_system_config_requires_existing_files(tmp_path: Path) -> None:
+    """structure/topology must exist on disk -- MembraneSystemConfig uses FilePath."""
+    topology = tmp_path / "topol.top"
+    topology.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        MembraneSystemConfig(structure=tmp_path / "missing.pdb", topology=topology)
+
+
+def test_to_parametrization_input_raises_for_membrane_system(tmp_path: Path) -> None:
+    """A [membrane_system] config has nothing to parametrize -- fails with a clear message."""
+    structure = tmp_path / "atomistic-system.pdb"
+    topology = tmp_path / "topol.top"
+    structure.write_text("", encoding="utf-8")
+    topology.write_text("", encoding="utf-8")
+
+    cfg = RunConfig(membrane_system=MembraneSystemConfig(structure=structure, topology=topology))
+
+    with pytest.raises(ValueError, match="membrane_system"):
+        cfg.to_parametrization_input(tmp_path / "work")
 
 
 # ---------------------------------------------------------------------------
