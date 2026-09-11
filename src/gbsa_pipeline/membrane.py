@@ -342,17 +342,27 @@ class MembraneGeometry:
     def pb_params(self, **overrides: Any) -> PBParams:
         """Build a membrane-ready ``PBParams(memopt=1, ...)`` from this geometry.
 
-        Sets ``mctrdz``/``mthick`` from the measurement and ``eneopt=1``
-        (required alongside ``memopt=1`` — see ``PBParams.__post_init__``).
-        Any keyword in ``overrides`` (e.g. ``emem``, ``poretype``) takes
-        precedence, including over ``eneopt``/``mctrdz``/``mthick`` themselves
-        if the caller has a reason to override the measurement.
+        Sets ``mctrdz``/``mthick`` from the measurement and
+        ``eneopt``/``ipb``/``nfocus``/``bcopt`` to the values ``memopt=1``
+        requires (see ``PBParams.__post_init__`` for why each one) --
+        confirmed by running a real membrane system through gmx_MMPBSA/sander
+        end to end. Any keyword in ``overrides`` takes precedence, including
+        over these, if the caller has a specific reason to change them.
+
+        A real periodic-boundary PB grid over a large system's full box is
+        memory-hungry -- for a ~63k-atom system (31k complex atoms) even
+        ``scale=1.0, fillratio=1.5`` (a coarser grid than the class
+        defaults) exhausted 15 GB of RAM. Consider passing those as
+        overrides for large systems, and budget RAM accordingly regardless.
         """
         kwargs: dict[str, Any] = {
             "memopt": 1,
             "mctrdz": self.mctrdz,
             "mthick": self.mthick,
             "eneopt": 1,
+            "ipb": 1,
+            "nfocus": 1,
+            "bcopt": 10,
         }
         kwargs.update(overrides)
         return PBParams(**kwargs)

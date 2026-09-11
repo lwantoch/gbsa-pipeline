@@ -132,6 +132,18 @@ def test_write_creates_file(tmp_path: Path) -> None:
     assert out.stat().st_size > 0
 
 
+def _valid_membrane_pb_params(**overrides: object) -> PBParams:
+    """A minimal PBParams(memopt=1, ...) satisfying every __post_init__ check.
+
+    ipb/nfocus/bcopt are sander's own hard requirements for a membrane PB
+    calculation, confirmed by running a real membrane system through
+    gmx_MMPBSA/sander end to end -- see PBParams.__post_init__.
+    """
+    kwargs: dict[str, object] = {"memopt": 1, "eneopt": 1, "ipb": 1, "nfocus": 1, "bcopt": 10}
+    kwargs.update(overrides)
+    return PBParams(**kwargs)  # type: ignore[arg-type]
+
+
 def test_gb_with_membrane_pb_raises() -> None:
     """Requesting GB alongside an implicit-membrane PB config is rejected.
 
@@ -142,7 +154,7 @@ def test_gb_with_membrane_pb_raises() -> None:
     gmx_MMPBSA.
     """
     with pytest.raises(ValueError, match="membrane"):
-        MMPBSAConfig(gb=GBParams(), pb=PBParams(memopt=1, eneopt=1))
+        MMPBSAConfig(gb=GBParams(), pb=_valid_membrane_pb_params())
 
 
 def test_pb_only_membrane_config_is_accepted() -> None:
@@ -151,7 +163,7 @@ def test_pb_only_membrane_config_is_accepted() -> None:
     This is the supported path for membrane-protein MM/PBSA runs: PB only,
     with the implicit membrane enabled.
     """
-    config = MMPBSAConfig(gb=None, pb=PBParams(memopt=1, eneopt=1))
+    config = MMPBSAConfig(gb=None, pb=_valid_membrane_pb_params())
     text = config.to_text()
 
     assert "&gb" not in text
@@ -179,3 +191,43 @@ def test_membrane_emem_out_of_bounds_raises() -> None:
     """
     with pytest.raises(ValueError, match="emem"):
         PBParams(memopt=1, eneopt=1, emem=100.0)
+
+
+def test_membrane_with_default_ipb_raises() -> None:
+    """PBParams(memopt=1) with the default ipb=2 is rejected.
+
+    Confirmed against real sander: "PB Bomb in pb_read(): membrane SAS and
+    SES are only compatible with ipb=1" -- found running a real membrane
+    system (M2 muscarinic receptor, POPC bilayer) through gmx_MMPBSA.
+    """
+    with pytest.raises(ValueError, match="ipb"):
+        _valid_membrane_pb_params(ipb=2)
+
+
+def test_membrane_with_default_nfocus_raises() -> None:
+    """PBParams(memopt=1) with the default nfocus=2 is rejected.
+
+    Confirmed against real sander: "PB Bomb in pb_read(): membrane setup is
+    only compatible with nonfocussing FDPB".
+    """
+    with pytest.raises(ValueError, match="nfocus"):
+        _valid_membrane_pb_params(nfocus=2)
+
+
+def test_membrane_with_non_periodic_bcopt_raises() -> None:
+    """PBParams(memopt=1) with the default bcopt=5 is rejected.
+
+    Confirmed against real sander: "PB Bomb in pb_read(): membrane setup is
+    only compatible with the periodic boundary".
+    """
+    with pytest.raises(ValueError, match="bcopt"):
+        _valid_membrane_pb_params(bcopt=5)
+
+
+def test_membrane_pb_params_with_all_requirements_satisfied_is_accepted() -> None:
+    """The exact combination confirmed working end to end against a real system."""
+    config = _valid_membrane_pb_params()
+
+    assert config.ipb == 1
+    assert config.nfocus == 1
+    assert config.bcopt == 10

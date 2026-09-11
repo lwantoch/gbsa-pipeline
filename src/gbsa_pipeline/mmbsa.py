@@ -253,16 +253,35 @@ class PBParams:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Reject membrane settings known to be broken in gmx_MMPBSA.
+        """Reject membrane settings known to be broken (or rejected by sander) with memopt=1.
 
-        Both checks only apply when ``memopt`` enables the implicit
-        membrane; a standard soluble-protein PB run is unaffected.
+        All checks only apply when ``memopt`` enables the implicit membrane;
+        a standard soluble-protein PB run is unaffected. ``eneopt``/``emem``
+        come from the gmx_MMPBSA docs; ``ipb``/``nfocus``/``bcopt`` are
+        sander's *own* hard requirements for a membrane PB calculation --
+        confirmed by running a real membrane system (M2 muscarinic receptor,
+        POPC bilayer, ~31k complex atoms) through gmx_MMPBSA/sander directly,
+        each rejected with its own explicit "PB Bomb" error until all three
+        were set correctly together:
 
         * ``eneopt=2`` (the charge-view energy method, and this class's
           default) is unsupported for membrane systems — membrane examples
           in the gmx_MMPBSA docs all use ``eneopt=1``.
         * ``emem`` must satisfy ``indi <= emem < exdi``, per the docs for
           the membrane dielectric constant.
+        * ``ipb=2`` (this class's default, level-set dielectric boundary):
+          sander -- "membrane SAS and SES are only compatible with ipb=1".
+        * ``nfocus=2`` (this class's default, focusing multi-level grid):
+          sander -- "membrane setup is only compatible with nonfocussing
+          FDPB", i.e. ``nfocus=1``.
+        * ``bcopt=5`` (this class's default): sander -- "membrane setup is
+          only compatible with the periodic boundary", i.e. ``bcopt=10``.
+
+        Note: even with all of the above satisfied, a full periodic-boundary
+        PB grid over a large membrane system's entire box is memory-hungry
+        -- a ~63k-atom system (31k in the complex) exhausted 15 GB of RAM
+        here even with a coarser grid (``scale=1.0``, ``fillratio=1.5``).
+        Budget accordingly, or measure on a smaller/focused system.
         """
         if not self.memopt:
             return
@@ -273,6 +292,21 @@ class PBParams:
         if not (self.indi <= self.emem < self.exdi):
             raise ValueError(
                 f"pb.emem ({self.emem}) must satisfy indi <= emem < exdi ({self.indi} <= emem < {self.exdi})."
+            )
+        if self.ipb != 1:
+            raise ValueError(
+                f"pb.ipb={self.ipb} is unsupported with pb.memopt=1; sander requires ipb=1 for membrane "
+                "SAS/SES ('membrane SAS and SES are only compatible with ipb=1')."
+            )
+        if self.nfocus != 1:
+            raise ValueError(
+                f"pb.nfocus={self.nfocus} is unsupported with pb.memopt=1; sander requires nonfocussing "
+                "FDPB (nfocus=1) for membrane systems."
+            )
+        if self.bcopt != 10:  # noqa: PLR2004
+            raise ValueError(
+                f"pb.bcopt={self.bcopt} is unsupported with pb.memopt=1; sander requires the periodic "
+                "boundary condition (bcopt=10) for membrane systems."
             )
 
 

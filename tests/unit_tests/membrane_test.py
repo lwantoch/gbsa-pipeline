@@ -50,9 +50,12 @@ def test_estimate_membrane_geometry_default_resnames_match_pdb_truncated_dppc() 
 def test_estimate_membrane_geometry_pb_params_is_membrane_ready() -> None:
     """MembraneGeometry.pb_params() produces a valid memopt=1 PBParams.
 
-    eneopt must be 1 (memopt=1 rejects the eneopt=2 default — see
-    mmbsa.PBParams.__post_init__) and mthick/mctrdz must come from the
-    measurement, not gmx_MMPBSA's plain soluble-protein defaults.
+    eneopt/ipb/nfocus/bcopt must all be set to what memopt=1 requires (see
+    mmbsa.PBParams.__post_init__ -- ipb/nfocus/bcopt confirmed against real
+    sander, which rejects each of their class defaults for a membrane
+    calculation with its own explicit "PB Bomb" error), and mthick/mctrdz
+    must come from the measurement, not gmx_MMPBSA's plain soluble-protein
+    defaults.
     """
     geometry = estimate_membrane_geometry(STRUCTURE, lipid_resnames=["DPP"])
 
@@ -60,6 +63,9 @@ def test_estimate_membrane_geometry_pb_params_is_membrane_ready() -> None:
 
     assert pb.memopt == 1
     assert pb.eneopt == 1
+    assert pb.ipb == 1
+    assert pb.nfocus == 1
+    assert pb.bcopt == 10
     assert pb.mthick == geometry.mthick
     assert pb.mctrdz == geometry.mctrdz
 
