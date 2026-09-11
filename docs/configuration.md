@@ -71,6 +71,7 @@ Either `padding` or `box_size` must be provided.
 |-------|------|---------|-------------|
 | `nsteps` | int | `10000` | Maximum number of minimization steps |
 | `emtol` | float | `10.0` | Convergence criterion: max force (kJ mol⁻¹ nm⁻¹) |
+| `define` | str | `null` | GROMACS preprocessor define for the SD minimization stage, e.g. `"-DFLEX_SPC"`. For systems whose starting coordinates aren't precise enough for rigid SETTLE-constrained water (e.g. externally-built membrane systems) — minimizing with flexible water for this first pass avoids the resulting NaN potential energy at step 0. Leave unset for the ordinary protein-ligand path |
 
 ---
 
@@ -160,10 +161,10 @@ through equilibration too.
 
 ## Membrane protein example
 
-`examples/membrane_1py6.toml` runs bacteriorhodopsin (PDB
-[1py6](https://www.rcsb.org/structure/1PY6)) in a DPPC bilayer end to end,
-starting from a pre-built [MemProtMD](https://memprotmd.bioch.ox.ac.uk/)
-system committed at `tests/testdata/membrane/1py6/`:
+`examples/membrane_1py6.toml` configures a run for bacteriorhodopsin (PDB
+[1py6](https://www.rcsb.org/structure/1PY6)) in a DPPC bilayer, starting from
+a pre-built [MemProtMD](https://memprotmd.bioch.ox.ac.uk/) system committed
+at `tests/testdata/membrane/1py6/`:
 
 ```toml
 [membrane_system]
@@ -183,6 +184,23 @@ constraints     = "h-bonds"
 ```bash
 gbsa-pipeline examples/membrane_1py6.toml -o results/1py6
 ```
+
+**Known limitation.** As committed, this config loads successfully (stage
+1-2) but does not complete a full run. MemProtMD's default output is
+GROMOS53a6-parametrized (G96 bonds/angles), which BioSimSpace/Sire cannot
+fully round-trip — see `scripts/convert_gromos_to_harmonic.py`, a standalone
+data-prep script that converts them to an equivalent harmonic form; point
+this config's `structure`/`topology` at its output. Even after that,
+BioSimSpace/Sire's topology writer separately drops the lipid's
+`[nonbond_params]`/`[pairtypes]` override tables on re-serialization, which
+is enough to blow up minimization to a NaN potential energy for this
+specific force field — a confirmed BioSimSpace/Sire library bug (full
+investigation in
+[`gbsa_pipeline.membrane`][gbsa_pipeline.membrane]'s module docstring), not
+something fixable from this pipeline's code. `[membrane_system]` itself
+works end-to-end for systems whose force field doesn't rely on such
+overrides — e.g. an AMBER/CHARMM-parametrized membrane system built with
+CHARMM-GUI + tleap.
 
 Three things differ from the standard protein-ligand path:
 

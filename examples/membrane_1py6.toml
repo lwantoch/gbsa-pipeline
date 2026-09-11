@@ -6,6 +6,20 @@
 # 1-2) entirely, starting straight at SD minimization. See
 # docs/configuration.md#membrane_system.
 #
+# KNOWN LIMITATION -- as committed, this config loads but does not complete
+# a full run. MemProtMD's default output is GROMOS53a6-parametrized (G96
+# bonds/angles), which BioSimSpace/Sire cannot fully round-trip -- run
+# structure/topology through scripts/convert_gromos_to_harmonic.py first and
+# point this file at the converted output. Even after that, BioSimSpace/
+# Sire's topology writer separately drops the lipid's [nonbond_params]/
+# [pairtypes] override tables on re-serialization, which is enough to blow
+# up minimization to a NaN potential energy for this specific force field --
+# a confirmed BioSimSpace/Sire library bug (see gbsa_pipeline.membrane's
+# module docstring for the full investigation), not something fixable from
+# this config or from gbsa_pipeline. [membrane_system] itself works
+# end-to-end for systems whose force field doesn't rely on such overrides
+# (e.g. AMBER/CHARMM-parametrized membrane systems from CHARMM-GUI).
+#
 # To fetch a different PDB entry instead of using the committed fixture:
 #
 #   from pathlib import Path
