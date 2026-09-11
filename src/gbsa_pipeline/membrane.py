@@ -222,6 +222,13 @@ def estimate_membrane_geometry(
 ) -> MembraneGeometry:
     """Measure bilayer ``mthick``/``mctrdz`` from a structure's lipid phosphate atoms.
 
+    ``structure`` must be a ``.pdb`` or ``.cif``/``.mmcif`` file — whatever
+    gemmi (this function's parser) reads. It is *not* a GROMACS ``.gro``:
+    gemmi doesn't parse that format, so a production-stage ``.gro`` must be
+    converted first, e.g. ``BSS.IO.saveMolecules(prefix, system, "pdb")``
+    (the same conversion the mmbsa integration test does before calling
+    gmx_MMPBSA, which also needs ``-cs`` as ``.pdb``/``.tpr``, never ``.gro``).
+
     Collects the z-coordinate of every atom whose residue name is in
     ``lipid_resnames`` and whose atom name starts with ``"P"`` (the phosphate
     — true across the CHARMM ``"P"``, Amber Lipid21 ``"P31"``, and GROMOS/
@@ -232,8 +239,15 @@ def estimate_membrane_geometry(
     Raises ``ValueError`` if fewer than ``_MIN_PHOSPHATES_PER_LEAFLET`` atoms
     land in either leaflet — usually a sign that ``lipid_resnames`` doesn't
     match the structure (check the actual residue names first) or that the
-    structure isn't a bilayer at all.
+    structure isn't a bilayer at all — and if ``structure`` is a ``.gro`` file.
     """
+    if str(structure).lower().endswith(".gro"):
+        raise ValueError(
+            f"estimate_membrane_geometry() cannot read GROMACS .gro files ({structure}); "
+            "gemmi doesn't parse that format. Convert to PDB first, e.g. "
+            'BSS.IO.saveMolecules(prefix, system, "pdb").'
+        )
+
     resnames = frozenset(lipid_resnames)
     struct = (
         gemmi.read_pdb(str(structure))

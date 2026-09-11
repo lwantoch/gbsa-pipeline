@@ -79,3 +79,9 @@ def test_estimate_membrane_geometry_wrong_resname_raises() -> None:
     """A resname that matches nothing produces a clear, actionable error."""
     with pytest.raises(ValueError, match="No phosphate atoms found"):
         estimate_membrane_geometry(STRUCTURE, lipid_resnames=["NOPE"])
+
+
+def test_estimate_membrane_geometry_rejects_gro_files() -> None:
+    """.gro is rejected with a clear conversion hint -- gemmi cannot parse it."""
+    with pytest.raises(ValueError, match=r"\.gro"):
+        estimate_membrane_geometry(TESTDATA / "not_a_real_file.gro")
