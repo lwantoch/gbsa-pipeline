@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from gbsa_pipeline.cli import main as cli_main
 from gbsa_pipeline.config import (
     MembraneSystemConfig,
+    MinimizationConfig,
     RunConfig,
     SolvationConfig,
     SystemConfig,
@@ -235,6 +236,27 @@ def test_system_config_defaults() -> None:
 
     assert cfg.ligand is None
     assert cfg.net_charge is None
+
+
+def test_minimization_config_define_defaults_to_none() -> None:
+    """``define`` defaults to None -- the ordinary protein-ligand path is unaffected."""
+    cfg = MinimizationConfig()
+
+    assert cfg.define is None
+
+
+def test_minimization_config_accepts_flex_spc_define() -> None:
+    """``define`` carries a GROMACS preprocessor flag through, e.g. "-DFLEX_SPC".
+
+    Needed for systems whose starting coordinates aren't precise enough for
+    rigid SETTLE-constrained water (e.g. MemProtMD's CG2AT-backmapped
+    output) -- minimizing with flexible water for the first pass avoids the
+    resulting NaN potential energy at step 0. See MinimizationConfig's
+    docstring for the full rationale.
+    """
+    cfg = MinimizationConfig(define="-DFLEX_SPC")
+
+    assert cfg.define == "-DFLEX_SPC"
 
 
 def test_system_config_extra_field_forbidden() -> None:

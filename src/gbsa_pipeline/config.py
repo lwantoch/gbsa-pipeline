@@ -56,12 +56,24 @@ class SolvationConfig(SolvationParams):
 
 
 class MinimizationConfig(BaseModel):
-    """[minimization] section — energy minimization settings."""
+    """[minimization] section — energy minimization settings.
+
+    ``define`` is passed straight through to the SD minimization stage's
+    generated MDP as a GROMACS preprocessor define (e.g. ``"-DFLEX_SPC"``).
+    Needed for systems assembled by external tools (e.g. MemProtMD's
+    CG2AT-backmapped water) where the initial coordinates aren't precise
+    enough for rigid SETTLE-constrained water: minimizing with flexible
+    (bonded) water for this first pass avoids the resulting NaN potential
+    energy at step 0. Confirmed against MemProtMD's own em.mdp, which sets
+    exactly this define for the same reason. Leave unset for the ordinary
+    protein-ligand path.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     nsteps: int = 10_000
     emtol: float = 10.0
+    define: str | None = None
 
 
 class EquilibrationConfig(BaseModel):
