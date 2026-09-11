@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 from gbsa_pipeline import md
-from gbsa_pipeline.mdp import Barostat, GromacsParams, PCoupleType
+from gbsa_pipeline.mdp import Barostat, GromacsParams, PCoupleType, Thermostat
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -458,15 +458,24 @@ def test_run_production_omits_work_dir_when_not_provided(
 
 
 def test_npt_barostat_overrides_forwards_membrane_pcoupling() -> None:
-    """npt_barostat_overrides() carries the [md] barostat into the NPT stages.
+    """npt_barostat_overrides() carries the [md] ensemble settings into the NPT stages.
 
     run_npt_equilibration applies its params as a full MDP overlay, so a bare
-    _NPT_STABILITY_PARAMS would silently reset pressure coupling back to
-    GromacsParams' isotropic default. For a membrane system where [md] sets
-    pcoupltype = semiisotropic, NPT equilibration must see that too, not just
-    production.
+    _NPT_STABILITY_PARAMS would silently reset pressure coupling (and the
+    thermostat, back to GromacsParams' tcoupl="no" default) regardless of
+    what [md] configured for production. For a membrane system where [md]
+    sets pcoupltype = semiisotropic, NPT equilibration must see that too, not
+    just production.
+
+    tcoupl/ref_t are asserted here too: C-rescale (used above) requires an
+    active ensemble temperature -- gmx grompp refuses to run with
+    tcoupl = "no" ("Can not use the C-rescale barostat without an ensemble
+    temperature for the system"), which is exactly what forwarding only the
+    barostat fields and not the thermostat produces.
     """
     md_params = GromacsParams(
+        tcoupl=Thermostat.VRESCALE,
+        ref_t=300.0,
         pcoupl=Barostat.CRESCALE,
         pcoupltype=PCoupleType.SEMIISOTROPIC,
         ref_p=(1.0, 1.0),
@@ -480,6 +489,8 @@ def test_npt_barostat_overrides_forwards_membrane_pcoupling() -> None:
     assert overrides["pcoupltype"] == PCoupleType.SEMIISOTROPIC
     assert overrides["ref_p"] == (1.0, 1.0)
     assert overrides["compressibility"] == (4.5e-5, 4.5e-5)
+    assert overrides["tcoupl"] == Thermostat.VRESCALE
+    assert overrides["ref_t"] == 300.0
     assert "nsteps" not in overrides
 
 
