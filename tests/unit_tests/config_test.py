@@ -213,6 +213,36 @@ def test_membrane_system_config_requires_existing_files(tmp_path: Path) -> None:
         MembraneSystemConfig(structure=tmp_path / "missing.pdb", topology=topology)
 
 
+def test_membrane_system_config_detects_gromacs_topology(tmp_path: Path) -> None:
+    """A .top topology is detected as GROMACS, not AMBER."""
+    structure = tmp_path / "atomistic-system.pdb"
+    topology = tmp_path / "topol.top"
+    structure.write_text("", encoding="utf-8")
+    topology.write_text("", encoding="utf-8")
+
+    cfg = MembraneSystemConfig(structure=structure, topology=topology)
+
+    assert cfg.is_amber_format is False
+
+
+@pytest.mark.parametrize("suffix", [".prmtop", ".parm7"])
+def test_membrane_system_config_detects_amber_topology(tmp_path: Path, suffix: str) -> None:
+    """.prmtop/.parm7 topologies are detected as AMBER -- no canonicalization needed.
+
+    Confirmed end-to-end (load, minimize) against a real Lipid21-parametrized
+    membrane protein built with packmol-memgen; see the pipeline._stage_load_
+    membrane_system docstring.
+    """
+    structure = tmp_path / "system.inpcrd"
+    topology = tmp_path / f"system{suffix}"
+    structure.write_text("", encoding="utf-8")
+    topology.write_text("", encoding="utf-8")
+
+    cfg = MembraneSystemConfig(structure=structure, topology=topology)
+
+    assert cfg.is_amber_format is True
+
+
 def test_to_parametrization_input_raises_for_membrane_system(tmp_path: Path) -> None:
     """A [membrane_system] config has nothing to parametrize -- fails with a clear message."""
     structure = tmp_path / "atomistic-system.pdb"

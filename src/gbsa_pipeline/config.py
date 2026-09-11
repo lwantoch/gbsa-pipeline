@@ -34,17 +34,39 @@ class SystemConfig(BaseModel):
 class MembraneSystemConfig(BaseModel):
     """[membrane_system] section — start from a pre-built protein-in-bilayer system.
 
-    Structure/topology are already a complete, solvated GROMACS system (e.g.
-    MemProtMD's atomistic output — see gbsa_pipeline.membrane), so setting
+    Structure/topology are already a complete, solvated system, so setting
     this skips the parametrize and solvate stages entirely: the pipeline
     loads structure/topology directly and starts at SD minimization.
     Mutually exclusive with [system] — see RunConfig._validate_system_source.
+
+    Two formats are accepted, detected from ``topology``'s extension:
+
+    * **GROMACS** — ``structure`` is ``.pdb``/``.gro``, ``topology`` is
+      ``.top``. Run through
+      :func:`~gbsa_pipeline.membrane.canonicalize_gromacs_system` first to
+      work around known legacy-GROMACS/BioSimSpace loader issues. Force
+      fields that rely on ``[nonbond_params]``/``[pairtypes]`` override
+      tables — e.g. MemProtMD's default GROMOS53a6 output — hit a separate
+      BioSimSpace/Sire data-loss bug on re-serialization; see
+      ``gbsa_pipeline.membrane``'s module docstring for the full
+      investigation.
+    * **AMBER** — ``structure`` is ``.inpcrd``/``.rst7``, ``topology`` is
+      ``.prmtop``/``.parm7``. No canonicalization needed and neither
+      BioSimSpace issue above applies — confirmed working end-to-end against
+      a real Lipid21-parametrized membrane protein (built with
+      ``packmol-memgen``; CHARMM-GUI's Amber-format output should work
+      the same way).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    structure: FilePath  # .pdb or .gro
-    topology: FilePath  # .top
+    structure: FilePath  # .pdb/.gro (GROMACS) or .inpcrd/.rst7 (AMBER)
+    topology: FilePath  # .top (GROMACS) or .prmtop/.parm7 (AMBER)
+
+    @property
+    def is_amber_format(self) -> bool:
+        """True for an AMBER ``.prmtop``/``.parm7`` topology, False for GROMACS ``.top``."""
+        return self.topology.suffix.lower() in (".prmtop", ".parm7")
 
 
 class SolvationConfig(SolvationParams):
