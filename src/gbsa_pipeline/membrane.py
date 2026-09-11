@@ -17,13 +17,40 @@ This module has two independent jobs:
     phosphate atoms, so the values fed into the GBSA/PBSA calculation reflect
     the system that was actually simulated rather than a guess.
 
-These two are independent by design: ``estimate_membrane_geometry`` works on
-any structure with recognisable lipid headgroups, not only MemProtMD output.
+``canonicalize_gromacs_system``
+    Round-trip a structure+topology pair through ``gmx grompp``/``editconf``
+    to fix two legacy-GROMACS issues that break BioSimSpace/Sire's loader —
+    see its docstring. Needed before ``BSS.IO.readMolecules`` for MemProtMD's
+    ``atomistic-system.pdb`` (written by GROMACS 4.6.2's pdb2gmx).
+
+These are independent by design: ``estimate_membrane_geometry`` works on any
+structure with recognisable lipid headgroups, not only MemProtMD output.
+
+Known limitation: MemProtMD's default output is GROMOS53a6-parametrized
+(G96 bonds/angles), which needs converting to harmonic form before
+BioSimSpace/Sire can even round-trip it — see
+``scripts/convert_gromos_to_harmonic.py`` (deliberately a standalone script,
+not part of this module: it's a one-off data-prep fix, not something to run
+on every load). Converting the bonds/angles is necessary but *not*
+sufficient to run a full MD stage through this pipeline: BioSimSpace/Sire's
+GROTOP writer also silently drops ``[nonbond_params]``/``[pairtypes]``
+override tables on re-serialization (confirmed: 541 + 105 entries in
+MemProtMD's own ``itp/lipid-gmx53a6.itp``, 0 in what Sire writes back out),
+which the OPLS-style lipid parameters need for correct nonbonded
+interactions. For MemProtMD's 1py6 example this data loss is enough that
+minimization diverges to a NaN potential energy at step 0, even though the
+identical (harmonic-converted) files minimize cleanly under plain
+``gmx grompp``/``mdrun``. This is a BioSimSpace/Sire topology-writer bug, not
+fixable from this pipeline's code — loading (``canonicalize_gromacs_system``)
+and geometry measurement work regardless, but a full run needs either a
+membrane system whose force field doesn't rely on ``[nonbond_params]``
+overrides, or an upstream fix to Sire's GROTOP writer.
 """
 
 from __future__ import annotations
 
 import logging
+import subprocess
 import urllib.error
 import urllib.request
 import zipfile
@@ -174,6 +201,112 @@ def _safe_extract(zip_path: Path, dest_dir: Path) -> None:
             if not target.is_relative_to(resolved_dest):
                 raise ValueError(f"Refusing to extract unsafe zip member: {member.filename!r}")
         zf.extractall(dest_dir)  # members validated above
+
+
+# ---------------------------------------------------------------------------
+# Canonicalizing legacy GROMACS systems for BioSimSpace/Sire
+# ---------------------------------------------------------------------------
+
+# grompp only needs to succeed here, not produce a physically meaningful
+# .tpr -- nothing is ever simulated from it -- so electrostatics/cutoff
+# settings are irrelevant to correctness; generous cutoffs just avoid
+# unrelated grompp warnings for whatever box size the input happens to have.
+_CANONICALIZE_MDP = """\
+integrator    = steep
+nsteps        = 0
+cutoff-scheme = Verlet
+coulombtype   = cut-off
+rcoulomb      = 1.2
+rvdw          = 1.2
+rlist         = 1.2
+"""
+
+
+def canonicalize_gromacs_system(
+    structure: Path,
+    topology: Path,
+    work_dir: Path,
+    *,
+    maxwarn: int = 50,
+    gmx: str = "gmx",
+) -> Path:
+    """Round-trip *structure*+*topology* through GROMACS into a fresh ``.gro``.
+
+    BioSimSpace/Sire's own GROMACS reader is stricter than ``gmx grompp``
+    about two issues found in older systems (e.g. MemProtMD's
+    ``atomistic-system.pdb``, written by GROMACS 4.6.2's ``pdb2gmx`` — see
+    its ``topol.top`` header) and in large ones — both confirmed against that
+    exact file:
+
+    * Branched-hydrogen atom names with the counting digit *before* the name
+      in the coordinate file (``"1HH1"``) but *after* it in the topology
+      (``"HH11"``). ``grompp`` accepts this with an "atom name ... does not
+      match" warning and uses the topology's names; Sire raises "Could not
+      find a matching atom record" and ``BSS.IO.readMolecules`` fails outright.
+    * PDB's 4-digit residue-number field wrapping once a system has more than
+      9999 residues (this pipeline's 1py6 example has ~14000, wrapping
+      9999 -> 0). ``grompp`` doesn't care — it matches coordinates to the
+      topology positionally, by atom count, never by residue number — but
+      Sire's loader does key off residue number and fails the same way as
+      above, on an arbitrary water molecule wherever the wrap lands.
+
+    Running the pair through ``gmx grompp`` (a consistency check only —
+    ``nsteps = 0``, nothing is simulated) and then ``gmx editconf`` writes a
+    fresh ``.gro`` using the topology's own atom names and a 5-digit residue
+    field, sidestepping both issues at once. Safe to call even when neither
+    issue applies (e.g. an input that is already a clean ``.gro`) — the
+    round-trip is then a no-op beyond regenerating an equivalent file.
+
+    Requires a real GROMACS install: ``gmx`` on ``PATH``, or pass its full
+    path via ``gmx=``. Raises ``RuntimeError`` (with the captured stderr) if
+    either ``grompp`` or ``editconf`` fails.
+    """
+    # Resolve to absolute paths before setting cwd=work_dir below: a relative
+    # structure/topology (e.g. from a config file loaded elsewhere) would
+    # otherwise be reinterpreted relative to work_dir instead of the caller's
+    # original cwd, and a relative work_dir would double up on itself the
+    # same way for mdp/tpr/canonical_gro.
+    work_dir = work_dir.resolve()
+    structure = structure.resolve()
+    topology = topology.resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    mdp = work_dir / "canonicalize.mdp"
+    mdp.write_text(_CANONICALIZE_MDP)
+    tpr = work_dir / "canonicalize.tpr"
+
+    grompp = subprocess.run(  # noqa: S603
+        [
+            gmx,
+            "grompp",
+            "-f",
+            str(mdp),
+            "-c",
+            str(structure),
+            "-p",
+            str(topology),
+            "-o",
+            str(tpr),
+            "-maxwarn",
+            str(maxwarn),
+        ],
+        capture_output=True,
+        cwd=work_dir,
+        check=False,
+    )
+    if grompp.returncode != 0:
+        raise RuntimeError(f"gmx grompp failed while canonicalizing {structure}:\n{grompp.stderr.decode()}")
+
+    canonical_gro = work_dir / "canonical.gro"
+    editconf = subprocess.run(  # noqa: S603
+        [gmx, "editconf", "-f", str(tpr), "-o", str(canonical_gro)],
+        capture_output=True,
+        cwd=work_dir,
+        check=False,
+    )
+    if editconf.returncode != 0:
+        raise RuntimeError(f"gmx editconf failed while canonicalizing {structure}:\n{editconf.stderr.decode()}")
+
+    return canonical_gro
 
 
 # ---------------------------------------------------------------------------
