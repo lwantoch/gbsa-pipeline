@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from gbsa_pipeline.mmbsa import GeneralParams, MMPBSAConfig
+import pytest
+
+from gbsa_pipeline.mmbsa import GBParams, GeneralParams, MMPBSAConfig, PBParams
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -128,3 +130,29 @@ def test_write_creates_file(tmp_path: Path) -> None:
     assert returned == out
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_gb_with_membrane_pb_raises() -> None:
+    """Requesting GB alongside an implicit-membrane PB config is rejected.
+
+    gmx_MMPBSA silently ignores ``memopt`` for ``&gb`` — the GB models have no
+    membrane term — so this combination would compute a GB energy that quietly
+    ignores the membrane instead of failing loudly. MMPBSAConfig should reject
+    it at construction time rather than let a misleading input file reach
+    gmx_MMPBSA.
+    """
+    with pytest.raises(ValueError, match="membrane"):
+        MMPBSAConfig(gb=GBParams(), pb=PBParams(memopt=1, eneopt=1))
+
+
+def test_pb_only_membrane_config_is_accepted() -> None:
+    """A membrane PB config with gb=None constructs and renders memopt.
+
+    This is the supported path for membrane-protein MM/PBSA runs: PB only,
+    with the implicit membrane enabled.
+    """
+    config = MMPBSAConfig(gb=None, pb=PBParams(memopt=1, eneopt=1))
+    text = config.to_text()
+
+    assert "&gb" not in text
+    assert "memopt" in text

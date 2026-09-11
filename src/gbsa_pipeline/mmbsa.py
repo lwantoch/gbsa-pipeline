@@ -253,8 +253,10 @@ class MMPBSAConfig:
     file, which is how you request a GB-only or PB-only calculation.
     ``other_namelists`` is an open dict for namelists not modelled here
     (e.g. ``&rism``, ``&decomp``, ``&nmode``) without requiring changes to
-    this class.  No validation of parameter combinations is performed here;
-    gmx_MMPBSA itself reports incompatible options at runtime.
+    this class.  Little validation of parameter combinations is performed
+    here; gmx_MMPBSA itself reports most incompatible options at runtime.
+    The one combination checked eagerly is GB with an implicit membrane
+    (``pb.memopt``) — see :meth:`__post_init__`.
     """
 
     general: GeneralParams = field(default_factory=GeneralParams)
@@ -263,6 +265,24 @@ class MMPBSAConfig:
 
     # For namelists not modelled above (e.g. &rism, &decomp, &nmode)
     other_namelists: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Reject GB combined with an implicit membrane.
+
+        gmx_MMPBSA's Generalized Born models have no membrane term, so
+        ``memopt`` is silently ignored for ``&gb`` — the docs state
+        "Calculations for implicit membranes can be performed only with PB"
+        (https://valdes-tresanco-ms.github.io/gmx_MMPBSA/dev/input_file/#pb).
+        Requesting both would compute a GB energy that quietly ignores the
+        membrane the caller asked for, rather than failing loudly. Membrane
+        systems must set ``gb=None`` and use ``pb`` only.
+        """
+        if self.gb is not None and self.pb is not None and self.pb.memopt:
+            raise ValueError(
+                "GB does not support implicit membranes (pb.memopt=1); "
+                "gmx_MMPBSA computes membrane energies via PB only. "
+                "Set gb=None for membrane-protein runs."
+            )
 
     def to_text(self) -> str:
         """Render the full gmx_MMPBSA input file as a string.
