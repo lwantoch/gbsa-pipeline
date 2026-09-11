@@ -27,16 +27,34 @@ in the TOML config (e.g., `ref-t` → `ref_t`).
 
 Alternative to `[system]` for a protein already embedded in a lipid bilayer
 and solvated — e.g. the output of
-[`gbsa_pipeline.membrane.fetch_memprotmd_system`][gbsa_pipeline.membrane.fetch_memprotmd_system].
+[`gbsa_pipeline.membrane.fetch_memprotmd_system`][gbsa_pipeline.membrane.fetch_memprotmd_system]
+or a Lipid21 system built with AmberTools' `packmol-memgen`.
 `[forcefield]` is ignored (nothing is parametrized) and stages 1-2
 (parametrize, solvate) are skipped entirely — the pipeline loads
 `structure`/`topology` directly and starts at SD minimization. See
 [Membrane protein example](#membrane-protein-example) below.
 
+Two formats are accepted, auto-detected from `topology`'s extension:
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `structure` | path | **yes** | Structure file (`.pdb` or `.gro`) of the complete protein-in-bilayer-in-water system |
-| `topology` | path | **yes** | GROMACS `.top` topology for `structure`. Its `#include`d force-field/lipid `.itp` files must stay alongside it on disk |
+| `structure` | path | **yes** | GROMACS `.pdb`/`.gro`, or AMBER `.inpcrd`/`.rst7` |
+| `topology` | path | **yes** | GROMACS `.top`, or AMBER `.prmtop`/`.parm7`. A GROMACS `.top`'s `#include`d force-field/lipid `.itp` files must stay alongside it on disk |
+
+**AMBER is recommended when you have a choice.** Confirmed end-to-end
+(load, SD minimization) against a real Lipid21-parametrized membrane
+protein built with `packmol-memgen` — AMBER topologies have neither of the
+two BioSimSpace/Sire issues the GROMACS path works around (see below):
+```bash
+packmol-memgen -p protein.pdb -l POPC -r 1 --preoriented \
+  --ffprot ff14SB --fflip lipid21 --ffwat tip3p --parametrize -o membrane
+# -> membrane.pdb, membrane.prmtop, membrane.inpcrd
+```
+(`--preoriented` assumes `protein.pdb` is already membrane-normal-aligned,
+e.g. from the [OPM database](https://opm.phar.umich.edu/); omit it to let
+`packmol-memgen` orient the protein itself.) A C-terminus with non-standard
+oxygen names (e.g. `O1`/`O2` instead of AMBER's `O`/`OXT`) makes `tleap`
+fail with "does not have a type" — rename them first if so.
 
 ---
 
@@ -197,10 +215,17 @@ is enough to blow up minimization to a NaN potential energy for this
 specific force field — a confirmed BioSimSpace/Sire library bug (full
 investigation in
 [`gbsa_pipeline.membrane`][gbsa_pipeline.membrane]'s module docstring), not
-something fixable from this pipeline's code. `[membrane_system]` itself
-works end-to-end for systems whose force field doesn't rely on such
-overrides — e.g. an AMBER/CHARMM-parametrized membrane system built with
-CHARMM-GUI + tleap.
+something fixable from this pipeline's code.
+
+`[membrane_system]` itself is not the problem: pointed at an **AMBER**
+`.prmtop`/`.inpcrd` pair (see the `[membrane_system]` reference above) it
+runs end-to-end with no workaround needed — confirmed with a real
+Lipid21-parametrized M2 muscarinic receptor system (built with
+`packmol-memgen`, ~63,000 atoms): loads, and SD-minimizes cleanly (finite,
+decreasing energy over thousands of steps) where the GROMOS path diverges to
+NaN at step 0. The limitation above is specific to force fields that rely on
+GROMACS `[nonbond_params]`/`[pairtypes]` overrides, not to membrane systems
+or to `[membrane_system]` in general.
 
 Three things differ from the standard protein-ligand path:
 

@@ -45,6 +45,15 @@ fixable from this pipeline's code — loading (``canonicalize_gromacs_system``)
 and geometry measurement work regardless, but a full run needs either a
 membrane system whose force field doesn't rely on ``[nonbond_params]``
 overrides, or an upstream fix to Sire's GROTOP writer.
+
+This is specific to that override-table class of force field, not to
+membrane systems generally: an **AMBER** ``.prmtop``/``.inpcrd`` membrane
+system (Lipid21, no ``[nonbond_params]``-equivalent mechanism) needs neither
+``canonicalize_gromacs_system`` nor a bond/angle conversion, and is confirmed
+working end-to-end (load, SD minimization) against a real
+packmol-memgen-built system — see ``config.MembraneSystemConfig``'s
+docstring. Prefer AMBER format when you have a choice of how to build the
+input system.
 """
 
 from __future__ import annotations
