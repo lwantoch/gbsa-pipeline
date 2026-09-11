@@ -107,7 +107,13 @@ def field_to_mdp_key(field: str) -> str:
 
 
 def format_gmx_value(value: Any) -> str:
-    """Render a Python value as a GROMACS MDP token."""
+    """Render a Python value as a GROMACS MDP token.
+
+    Tuples/lists render as space-separated tokens — the format GROMACS expects
+    for multi-value keys such as ``ref-p`` and ``compressibility`` under
+    ``pcoupltype = semiisotropic`` (one value for the membrane plane, one for
+    the bilayer normal) or ``anisotropic`` (one per box dimension).
+    """
     if hasattr(value, "value"):  # Enum / StrEnum — unwrap to plain string
         value = value.value
     if isinstance(value, bool):
@@ -116,6 +122,8 @@ def format_gmx_value(value: Any) -> str:
         return str(value)
     if isinstance(value, str):
         return value.strip()
+    if isinstance(value, (tuple, list)):
+        return " ".join(format_gmx_value(v) for v in value)
     raise TypeError(f"Unsupported .mdp value type: {type(value).__name__}")
 
 
@@ -255,8 +263,12 @@ class GromacsParams(BaseModel):
     pcoupl: Barostat = Barostat.NO
     pcoupltype: PCoupleType = PCoupleType.ISOTROPIC
     tau_p: float = 2.0
-    ref_p: float = 1.0
-    compressibility: float = 4.5e-5
+    # A single float is correct for isotropic/no coupling. semiisotropic (the
+    # standard choice for a membrane bilayer) and anisotropic both need one
+    # value per coupled direction — (xy-plane, z-normal) for semiisotropic —
+    # so a 2-tuple is accepted and rendered as GROMACS's space-separated form.
+    ref_p: float | tuple[float, float] = 1.0
+    compressibility: float | tuple[float, float] = 4.5e-5
     refcoord_scaling: str = "No"
 
     # Thermostat
