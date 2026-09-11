@@ -156,12 +156,33 @@ def _stage_load_membrane_system(config: RunConfig, stage_dir: Path) -> Any:
 
 
 def _stage_minimize_sd(config: RunConfig, system: Any, stage_dir: Path) -> Any:
-    """Steepest-descent energy minimization."""
-    logger.info("  nsteps=%d  emtol=%.1f kJ/mol/nm", config.minimization.nsteps, config.minimization.emtol)
+    """Steepest-descent energy minimization.
+
+    ``params`` is applied as a complete MDP overlay (see
+    ``_apply_gromacs_params_to_config`` in md.py), so any field not given
+    here reverts to GromacsParams' class default -- including ``integrator``,
+    whose default is ``"md"`` (leapfrog), not ``"steep"``. Without an explicit
+    ``integrator: "steep"`` this stage silently ran plain MD dynamics on the
+    raw, unminimized starting structure instead of steepest-descent
+    minimization, which is exactly the kind of input that can blow up to a
+    NaN potential energy at step 0 -- confirmed while debugging the membrane
+    path, but the bug applies to every run, not only membrane ones.
+    """
+    logger.info(
+        "  nsteps=%d  emtol=%.1f kJ/mol/nm  define=%s",
+        config.minimization.nsteps,
+        config.minimization.emtol,
+        config.minimization.define or "(none)",
+    )
     return run_minimization(
         system,
         work_dir=stage_dir,
-        params={"nsteps": config.minimization.nsteps, "emtol": config.minimization.emtol},
+        params={
+            "integrator": "steep",
+            "nsteps": config.minimization.nsteps,
+            "emtol": config.minimization.emtol,
+            "define": config.minimization.define,
+        },
     )
 
 
