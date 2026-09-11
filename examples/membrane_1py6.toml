@@ -1,0 +1,63 @@
+# Membrane-protein example: bacteriorhodopsin (PDB 1py6) in a DPPC bilayer.
+#
+# structure/topology are MemProtMD's already-solvated protein-in-bilayer
+# system (see tests/testdata/membrane/1py6/SOURCE.md) -- so [membrane_system]
+# replaces [system] here and the pipeline skips parametrize/solvate (stages
+# 1-2) entirely, starting straight at SD minimization. See
+# docs/configuration.md#membrane_system.
+#
+# To fetch a different PDB entry instead of using the committed fixture:
+#
+#   from pathlib import Path
+#   from gbsa_pipeline.membrane import fetch_memprotmd_system
+#   system = fetch_memprotmd_system("1py6", Path("membrane_systems"))
+#   # -> system.structure, system.topology
+#
+# Run with:
+#   gbsa-pipeline examples/membrane_1py6.toml -o results/1py6
+
+[membrane_system]
+structure = "tests/testdata/membrane/1py6/atomistic-system.pdb"
+topology  = "tests/testdata/membrane/1py6/topol.top"
+
+[minimization]
+nsteps = 5000
+
+[equilibration]
+simulation_time_ps = 100.0
+
+[npt_equilibration]
+simulation_time_ps = 200.0
+
+[md]
+nsteps = 500000   # 1 ns at dt = 0.002
+dt     = 0.002
+tcoupl = "v-rescale"
+ref_t  = 300.0
+
+# semiisotropic: the membrane plane (x,y) and the bilayer normal (z) are
+# scaled independently by the barostat, instead of isotropically squashing
+# the bilayer the way a soluble-protein water box would be scaled. Applies to
+# both NPT equilibration stages and production -- see
+# gbsa_pipeline.md.npt_barostat_overrides().
+pcoupl          = "C-rescale"
+pcoupltype      = "semiisotropic"
+ref_p           = [1.0, 1.0]
+compressibility = [4.5e-5, 4.5e-5]
+constraints     = "h-bonds"
+
+# After the run, measure the implicit-membrane geometry from your own
+# equilibrated system (not guessed) and feed it into a PB-only (not GB --
+# see mmbsa.MMPBSAConfig.__post_init__) MM/PBSA calculation. estimate_membrane_
+# geometry() needs a PDB, but the production stage writes system.gro/.top, so
+# convert with BSS first (the same conversion gmx_MMPBSA's -cs flag needs):
+#
+#   import BioSimSpace as BSS
+#   from gbsa_pipeline.membrane import estimate_membrane_geometry
+#   from gbsa_pipeline.mmbsa import MMPBSAConfig
+#   production = BSS.IO.readMolecules(
+#       ["results/1py6/08_production/system.gro", "results/1py6/08_production/system.top"]
+#   )
+#   [complex_pdb] = BSS.IO.saveMolecules("results/1py6/08_production/system", production, "pdb")
+#   geometry = estimate_membrane_geometry(Path(complex_pdb))
+#   config = MMPBSAConfig(gb=None, pb=geometry.pb_params())

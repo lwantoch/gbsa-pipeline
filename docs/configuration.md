@@ -5,7 +5,7 @@ title: Configuration Reference
 # Configuration Reference
 
 All pipeline settings are declared in a single TOML file. Every section is
-optional except `[system]`.
+optional except exactly one of `[system]` or `[membrane_system]`.
 
 GROMACS MDP parameter names use **hyphens** in `.mdp` files but **underscores**
 in the TOML config (e.g., `ref-t` → `ref_t`).
@@ -20,6 +20,23 @@ in the TOML config (e.g., `ref-t` → `ref_t`).
 | `ligand` | path | no | Path to the ligand SDF file (3-D conformer required) |
 | `extra_ff_files` | list[path] | no | Extra OpenMM ForceField XML files (e.g., metal parameters) |
 | `net_charge` | int | no | Formal charge of the ligand (auto-detected when omitted) |
+
+---
+
+## `[membrane_system]`
+
+Alternative to `[system]` for a protein already embedded in a lipid bilayer
+and solvated — e.g. the output of
+[`gbsa_pipeline.membrane.fetch_memprotmd_system`][gbsa_pipeline.membrane.fetch_memprotmd_system].
+`[forcefield]` is ignored (nothing is parametrized) and stages 1-2
+(parametrize, solvate) are skipped entirely — the pipeline loads
+`structure`/`topology` directly and starts at SD minimization. See
+[Membrane protein example](#membrane-protein-example) below.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `structure` | path | **yes** | Structure file (`.pdb` or `.gro`) of the complete protein-in-bilayer-in-water system |
+| `topology` | path | **yes** | GROMACS `.top` topology for `structure`. Its `#include`d force-field/lipid `.itp` files must stay alongside it on disk |
 
 ---
 
@@ -105,8 +122,13 @@ Field names use underscores; they map to hyphenated GROMACS MDP keys.
 | `pcoupl` | `pcoupl` | str | `"no"` | Barostat: `"no"`, `"Berendsen"`, `"Parrinello-Rahman"`, `"C-rescale"`, `"MTTK"` |
 | `pcoupltype` | `pcoupltype` | str | `"isotropic"` | Coupling geometry: `"isotropic"`, `"semiisotropic"`, `"anisotropic"`, `"surface-tension"` |
 | `tau_p` | `tau-p` | float | `2.0` | Pressure coupling time constant (ps) |
-| `ref_p` | `ref-p` | float | `1.0` | Reference pressure (bar) |
-| `compressibility` | `compressibility` | float | `4.5e-5` | Isothermal compressibility (bar⁻¹) |
+| `ref_p` | `ref-p` | float or [float, float] | `1.0` | Reference pressure (bar). A 2-value list is required for `semiisotropic`/`anisotropic` (membrane-plane, bilayer-normal) |
+| `compressibility` | `compressibility` | float or [float, float] | `4.5e-5` | Isothermal compressibility (bar⁻¹); same 2-value rule as `ref_p` |
+
+`ref_p`/`compressibility` are also read (with the same stability overrides
+applied to `dt`/LINCS) by the two NPT equilibration stages, not only
+production — so a `semiisotropic` `[md]` barostat applies consistently
+through equilibration too.
 
 ### Electrostatics & VdW
 
@@ -133,3 +155,53 @@ Field names use underscores; they map to hyphenated GROMACS MDP keys.
 | `gen_vel` | `gen-vel` | str | `"no"` | Generate initial velocities: `"yes"` or `"no"` |
 | `gen_temp` | `gen-temp` | float | `300.0` | Temperature for velocity generation (K) |
 | `gen_seed` | `gen-seed` | int | `-1` | Random seed (`-1` = use system clock) |
+
+---
+
+## Membrane protein example
+
+`examples/membrane_1py6.toml` runs bacteriorhodopsin (PDB
+[1py6](https://www.rcsb.org/structure/1PY6)) in a DPPC bilayer end to end,
+starting from a pre-built [MemProtMD](https://memprotmd.bioch.ox.ac.uk/)
+system committed at `tests/testdata/membrane/1py6/`:
+
+```toml
+[membrane_system]
+structure = "tests/testdata/membrane/1py6/atomistic-system.pdb"
+topology  = "tests/testdata/membrane/1py6/topol.top"
+
+[md]
+nsteps          = 500000
+dt              = 0.002
+pcoupl          = "C-rescale"
+pcoupltype      = "semiisotropic"
+ref_p           = [1.0, 1.0]
+compressibility = [4.5e-5, 4.5e-5]
+constraints     = "h-bonds"
+```
+
+```bash
+gbsa-pipeline examples/membrane_1py6.toml -o results/1py6
+```
+
+Three things differ from the standard protein-ligand path:
+
+1. **`[membrane_system]` replaces `[system]`.** The structure/topology are
+   already a complete, solvated system — MemProtMD ran its own coarse-grained
+   self-assembly simulation and converted the result back to atomistic
+   detail — so parametrize and solvate (stages 1-2) are skipped; the pipeline
+   loads the files directly and starts at SD minimization. To fetch a
+   different PDB entry instead of the committed fixture, use
+   [`gbsa_pipeline.membrane.fetch_memprotmd_system`][gbsa_pipeline.membrane.fetch_memprotmd_system].
+2. **`pcoupltype = "semiisotropic"`.** A bilayer needs independent barostat
+   scaling in-plane vs. along the membrane normal; isotropic coupling (the
+   default) would squash it. `ref_p`/`compressibility` take the 2-value form
+   for this — see the `[md]` Barostat table above.
+3. **GBSA (`gmx_MMPBSA`) uses PB, not GB, with the membrane enabled.**
+   GB has no membrane term (see
+   [`mmbsa.MMPBSAConfig.__post_init__`][gbsa_pipeline.mmbsa.MMPBSAConfig]),
+   and `mthick`/`mctrdz` should come from the equilibrated system you actually
+   simulated, not a guess — that's what
+   [`gbsa_pipeline.membrane.estimate_membrane_geometry`][gbsa_pipeline.membrane.estimate_membrane_geometry]
+   is for. The full snippet is in the comments at the bottom of
+   `examples/membrane_1py6.toml`.

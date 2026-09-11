@@ -55,7 +55,9 @@ dt     = 0.002
 ```
 
 All sections except `[system]` are optional and fall back to sensible defaults.
-See [Configuration Reference](configuration.md) for all available fields.
+See [Configuration Reference](configuration.md) for all available fields,
+including the [membrane protein example](configuration.md#membrane-protein-example)
+for a protein already embedded in a lipid bilayer.
 
 ## Output structure
 
