@@ -18,6 +18,7 @@ from gbsa_pipeline.md import (
     run_solvent_relaxation,
 )
 from gbsa_pipeline.md_io import save_bss_system_to_gromacs
+from gbsa_pipeline.membrane import canonicalize_gromacs_system
 from gbsa_pipeline.parametrization import parametrize
 from gbsa_pipeline.solvation_bss import solvate_bss
 
@@ -124,12 +125,32 @@ def _stage_load_membrane_system(config: RunConfig, stage_dir: Path) -> Any:
     config.MembraneSystemConfig). make_whole=True rebuilds molecules split
     across periodic boundaries, matching how BSS-loaded systems are handled
     elsewhere in this pipeline (e.g. the mmbsa integration test's loader).
+
+    The structure is first run through canonicalize_gromacs_system(), which
+    fixes two legacy-GROMACS issues that make BioSimSpace/Sire's loader fail
+    outright (confirmed against MemProtMD's atomistic-system.pdb: a
+    hydrogen-naming convention mismatch, and a >9999-residue PDB
+    numbering wrap) even though plain gmx grompp tolerates both — see that
+    function's docstring. This needs a real GROMACS install; it is not
+    optional for the membrane_system path.
+
+    Loading a system fixed this way still doesn't guarantee later MD stages
+    will succeed: BioSimSpace/Sire's own topology writer has a separate,
+    unrelated data-loss bug (drops [nonbond_params]/[pairtypes] override
+    tables on re-serialization) that can break minimization for force fields
+    that rely on them, such as MemProtMD's default GROMOS+OPLS-lipid output —
+    see the gbsa_pipeline.membrane module docstring for the full
+    investigation. That is a BioSimSpace/Sire limitation, not something this
+    function (or this pipeline) can fix.
     """
     membrane = config.membrane_system
     if membrane is None:  # pragma: no cover — guarded by RunConfig's validator
         raise ValueError("_stage_load_membrane_system requires config.membrane_system to be set.")
-    logger.info("  structure=%s  topology=%s", membrane.structure, membrane.topology)
-    system = BSS.IO.readMolecules([str(membrane.structure), str(membrane.topology)], make_whole=True)
+    canonical_gro = canonicalize_gromacs_system(membrane.structure, membrane.topology, stage_dir / "_canonicalize")
+    logger.info(
+        "  structure=%s (canonicalized → %s)  topology=%s", membrane.structure, canonical_gro.name, membrane.topology
+    )
+    system = BSS.IO.readMolecules([str(canonical_gro), str(membrane.topology)], make_whole=True)
     logger.info("  Loaded %d molecules (%d atoms)", system.nMolecules(), system.nAtoms())
     return system
 
