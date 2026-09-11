@@ -156,3 +156,26 @@ def test_pb_only_membrane_config_is_accepted() -> None:
 
     assert "&gb" not in text
     assert "memopt" in text
+
+
+def test_membrane_with_default_eneopt_raises() -> None:
+    """PBParams(memopt=1) with the default eneopt=2 is rejected.
+
+    eneopt=2 (charge-view energies, PBParams' default) is unsupported for
+    membrane systems per the gmx_MMPBSA docs; the membrane examples all set
+    eneopt=1. Since PBParams defaults to eneopt=2, simply turning on memopt
+    without also overriding eneopt is a likely mistake worth catching early.
+    """
+    with pytest.raises(ValueError, match="eneopt"):
+        PBParams(memopt=1)
+
+
+def test_membrane_emem_out_of_bounds_raises() -> None:
+    """PBParams(memopt=1) requires indi <= emem < exdi.
+
+    The membrane dielectric constant must sit between the solute and solvent
+    dielectrics or gmx_MMPBSA errors; this checks the boundary is enforced
+    before the input file is even written.
+    """
+    with pytest.raises(ValueError, match="emem"):
+        PBParams(memopt=1, eneopt=1, emem=100.0)

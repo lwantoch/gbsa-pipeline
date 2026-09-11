@@ -177,9 +177,10 @@ class PBParams:
     membrane embedding (``memopt``, ``mthick``, ``mctrdz``), solver settings,
     and cavity/surface area terms.  Membrane-related fields are only active
     when ``memopt = 1``; they are included here for completeness and left at
-    their defaults for standard soluble-protein runs.  The ``extra`` dict
-    provides a forward-compatible escape hatch for keywords added in newer
-    gmx_MMPBSA versions.
+    their defaults for standard soluble-protein runs.  Enabling ``memopt``
+    also constrains two other defaults — see :meth:`__post_init__`.  The
+    ``extra`` dict provides a forward-compatible escape hatch for keywords
+    added in newer gmx_MMPBSA versions.
     See https://valdes-tresanco-ms.github.io/gmx_MMPBSA/dev/input_file/#pb
     for the full reference.
     """
@@ -242,6 +243,29 @@ class PBParams:
     npbverb: int = 0
 
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Reject membrane settings known to be broken in gmx_MMPBSA.
+
+        Both checks only apply when ``memopt`` enables the implicit
+        membrane; a standard soluble-protein PB run is unaffected.
+
+        * ``eneopt=2`` (the charge-view energy method, and this class's
+          default) is unsupported for membrane systems — membrane examples
+          in the gmx_MMPBSA docs all use ``eneopt=1``.
+        * ``emem`` must satisfy ``indi <= emem < exdi``, per the docs for
+          the membrane dielectric constant.
+        """
+        if not self.memopt:
+            return
+        if self.eneopt == 2:  # noqa: PLR2004
+            raise ValueError(
+                "pb.eneopt=2 (charge-view energies) is unsupported with pb.memopt=1; set eneopt=1 for membrane runs."
+            )
+        if not (self.indi <= self.emem < self.exdi):
+            raise ValueError(
+                f"pb.emem ({self.emem}) must satisfy indi <= emem < exdi ({self.indi} <= emem < {self.exdi})."
+            )
 
 
 @dataclass(frozen=True)
