@@ -129,6 +129,33 @@ _NPT_STABILITY_PARAMS: dict[str, Any] = {
     "lincs_order": 4,
 }
 
+# Barostat fields forwarded from the caller's [md] GromacsParams into the NPT
+# stages by npt_barostat_overrides(). Deliberately narrow: nsteps, dt, etc.
+# must stay stage-local (BSS derives nsteps from the NPT stage's own runtime,
+# not from the production step count), so a full GromacsParams cannot be
+# passed straight through the way it is for run_production.
+_BAROSTAT_FIELDS = ("pcoupl", "pcoupltype", "tau_p", "ref_p", "compressibility")
+
+
+def npt_barostat_overrides(md_params: GromacsParams) -> dict[str, Any]:
+    """Merge ``_NPT_STABILITY_PARAMS`` with the barostat settings from *md_params*.
+
+    ``run_npt_equilibration``/``run_production`` apply their ``params`` as a
+    complete MDP overlay (see ``_apply_gromacs_params_to_config``), so passing
+    ``_NPT_STABILITY_PARAMS`` alone always resets pressure coupling to
+    ``GromacsParams``'s isotropic default regardless of what the caller
+    configured for production. This pulls just ``pcoupl``, ``pcoupltype``,
+    ``tau_p``, ``ref_p``, and ``compressibility`` out of ``md_params`` so the
+    NPT equilibration stages use the same barostat as production — for a
+    membrane system that means ``pcoupltype = semiisotropic`` reaching NPT
+    equilibration too, not only the production stage.
+    """
+    return {
+        **_NPT_STABILITY_PARAMS,
+        **{field: getattr(md_params, field) for field in _BAROSTAT_FIELDS},
+    }
+
+
 _SOLVENT_RELAX_PARAMS: dict[str, Any] = {
     # sd integrator: damps velocity spikes in waters that were placed too
     # close to protein atoms by the solvation algorithm.  Heavy-atom

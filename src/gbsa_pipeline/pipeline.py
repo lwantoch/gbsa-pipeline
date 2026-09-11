@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar
 import BioSimSpace as BSS
 
 from gbsa_pipeline.md import (
+    npt_barostat_overrides,
     remove_clashing_solvent_waters,
     run_heating,
     run_minimization,
@@ -147,10 +148,27 @@ def _stage_nvt_restrained(config: RunConfig, system: Any, stage_dir: Path) -> An
 
 
 def _stage_npt(config: RunConfig, system: Any, stage_dir: Path, *, restraint: str | None = None) -> Any:
-    """NPT equilibration, optionally with backbone restraints."""
-    logger.info("  %.1f ps  restraint=%s", config.npt_equilibration.simulation_time_ps, restraint or "none")
+    """NPT equilibration, optionally with backbone restraints.
+
+    Uses the same barostat (pcoupltype, ref_p, compressibility, tau_p) as the
+    [md] production section — see npt_barostat_overrides() — so a membrane
+    system configured with pcoupltype = semiisotropic there gets consistent
+    (not isotropic) pressure coupling during equilibration too.
+    """
+    logger.info(
+        "  %.1f ps  restraint=%s  pcoupltype=%s",
+        config.npt_equilibration.simulation_time_ps,
+        restraint or "none",
+        config.md.pcoupltype,
+    )
     npt_time = config.npt_equilibration.simulation_time_ps * BSS.Units.Time.picosecond
-    return run_npt_equilibration(npt_time, system, work_dir=stage_dir, restraint=restraint)
+    return run_npt_equilibration(
+        npt_time,
+        system,
+        work_dir=stage_dir,
+        restraint=restraint,
+        params=npt_barostat_overrides(config.md),
+    )
 
 
 def _stage_production(config: RunConfig, system: Any, stage_dir: Path) -> Any:
