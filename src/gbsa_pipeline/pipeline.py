@@ -114,6 +114,26 @@ def _stage_solvate(
     return system
 
 
+def _stage_load_membrane_system(config: RunConfig, stage_dir: Path) -> Any:
+    """Load a pre-built, already-solvated membrane system (e.g. from MemProtMD).
+
+    Used instead of _stage_parametrize + _stage_solvate when
+    config.membrane_system is set: structure/topology are already a complete
+    protein-in-bilayer-in-water system, so there is nothing left to
+    parametrize or add solvent to (see gbsa_pipeline.membrane and
+    config.MembraneSystemConfig). make_whole=True rebuilds molecules split
+    across periodic boundaries, matching how BSS-loaded systems are handled
+    elsewhere in this pipeline (e.g. the mmbsa integration test's loader).
+    """
+    membrane = config.membrane_system
+    if membrane is None:  # pragma: no cover — guarded by RunConfig's validator
+        raise ValueError("_stage_load_membrane_system requires config.membrane_system to be set.")
+    logger.info("  structure=%s  topology=%s", membrane.structure, membrane.topology)
+    system = BSS.IO.readMolecules([str(membrane.structure), str(membrane.topology)], make_whole=True)
+    logger.info("  Loaded %d molecules (%d atoms)", system.nMolecules(), system.nAtoms())
+    return system
+
+
 def _stage_minimize_sd(config: RunConfig, system: Any, stage_dir: Path) -> Any:
     """Steepest-descent energy minimization."""
     logger.info("  nsteps=%d  emtol=%.1f kJ/mol/nm", config.minimization.nsteps, config.minimization.emtol)
@@ -204,6 +224,10 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
     7. **NPT** — NPT equilibration without restraints.
     8. **Production MD** — NpT simulation driven by ``[md]`` section params.
 
+    When ``config.membrane_system`` is set instead of ``config.system``,
+    stages 1-2 are replaced by a single load of the already-complete,
+    already-solvated system (see :class:`~gbsa_pipeline.config.MembraneSystemConfig`).
+
     Parameters
     ----------
     config:
@@ -215,16 +239,21 @@ def run_pipeline(config: RunConfig, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     _log_config(config, output_dir)
 
-    # Stage 1: Parametrize
-    logger.info("─── Stage 1/8: Parametrization ───")
-    param_dir = output_dir / "01_parametrize"
-    parametrized = _run_stage("parametrize", lambda: _stage_parametrize(config, param_dir))
-    logger.info("  Done → %s, %s", parametrized.gro_file.name, parametrized.top_file.name)
+    if config.membrane_system is not None:
+        logger.info("─── Stage 1-2/8: Loading pre-built membrane system ───")
+        sol_dir = output_dir / "02_solvated"
+        system = _run_stage("load_membrane_system", lambda: _stage_load_membrane_system(config, sol_dir))
+    else:
+        # Stage 1: Parametrize
+        logger.info("─── Stage 1/8: Parametrization ───")
+        param_dir = output_dir / "01_parametrize"
+        parametrized = _run_stage("parametrize", lambda: _stage_parametrize(config, param_dir))
+        logger.info("  Done → %s, %s", parametrized.gro_file.name, parametrized.top_file.name)
 
-    # Stage 2: Solvate
-    logger.info("─── Stage 2/8: Solvation ───")
-    sol_dir = output_dir / "02_solvated"
-    system = _run_stage("solvation", lambda: _stage_solvate(config, parametrized, sol_dir))
+        # Stage 2: Solvate
+        logger.info("─── Stage 2/8: Solvation ───")
+        sol_dir = output_dir / "02_solvated"
+        system = _run_stage("solvation", lambda: _stage_solvate(config, parametrized, sol_dir))
 
     system = _run_md_stage(
         "Stage 3/8: SD Minimization",
