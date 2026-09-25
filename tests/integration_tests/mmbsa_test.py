@@ -15,7 +15,7 @@ from pathlib import Path
 import BioSimSpace as BSS
 import pytest
 
-from gbsa_pipeline.gromacs_index import select_receptor_and_ligand_atoms_by_number, write_index
+from gbsa_pipeline.gromacs_index import select_receptor_and_ligand_atoms, write_index
 from gbsa_pipeline.mmbsa import MMPBSAConfig, run_gmx_mmpbsa_from_gromacs
 
 TESTDATA = Path(__file__).resolve().parents[1] / "testdata" / "mmbsa"
@@ -79,16 +79,14 @@ def test_gbsa_full_run(tmp_path: Path) -> None:
     bss_system = _load_bss_system(COMPLEX_GRO, TOPOL_TOP)
     sire_system = bss_system._sire_object  # type: ignore[attr-defined]
 
-    # Iterate directly over the raw sire system for molecule identification.
-    molecules = list(sire_system)
-
     # Molecule ordering for this system: protein (idx 0, 6645 atoms),
-    # ligand UNK (idx 1, 19 atoms), then water and ions.
-    protein = molecules[0]
-    ligand = molecules[1]
+    # ligand UNK (idx 1, 19 atoms), then water and ions. Only the ligand's
+    # moleculetype name is needed -- selection itself now reads the topology.
+    ligand = list(sire_system)[1]
+    ligand_moltype = ligand.residues()[0].name().value()
 
     index_file = tmp_path / "index.ndx"
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(sire_system, protein, ligand)
+    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms(TOPOL_TOP, ligand_moltype)
     write_index(receptor_atoms, ligand_atoms, index_file)
     assert index_file.exists()
 

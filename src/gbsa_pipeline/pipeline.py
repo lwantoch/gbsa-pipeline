@@ -11,11 +11,7 @@ import BioSimSpace as BSS
 import MDAnalysis as mda
 
 from gbsa_pipeline.config import MembraneConfig
-from gbsa_pipeline.gromacs_index import (
-    select_receptor_and_ligand_atoms_by_number,
-    select_receptor_and_ligand_atoms_by_position,
-    write_index,
-)
+from gbsa_pipeline.gromacs_index import select_receptor_and_ligand_atoms, write_index
 from gbsa_pipeline.md import (
     npt_barostat_overrides,
     remove_clashing_solvent_waters,
@@ -320,11 +316,15 @@ def _stage_mmbsa(
     ``gromacs.top`` -- gmx_MMPBSA needs these, not the ``system.gro``/``.top``
     snapshot ``_run_md_stage`` separately re-exports.
 
-    Receptor/ligand identification relies on GROMACS round-trips never
-    reordering existing molecules, only appending new ones. For a
-    ``[system]`` run, ``parametrize()`` always places protein first and
-    ligand second, so :func:`select_receptor_and_ligand_atoms_by_number`
-    reads those positions directly off the raw production files.
+    The ligand molecule itself is still identified positionally (protein
+    first, ligand second for a ``[system]`` run -- ``parametrize()``'s own
+    convention; ligand at ``n_protein_molecules`` for a ``[membrane]`` run,
+    per :func:`extract_protein_ligand_system`), but the Receptor/Ligand atom
+    *index* selection passed to gmx_MMPBSA is then computed from the ligand's
+    moleculetype name against the actual topology file gmx_MMPBSA itself will
+    load, via :func:`~gbsa_pipeline.gromacs_index.select_receptor_and_ligand_atoms`
+    -- the same GROMACS moleculetype identity gmx_MMPBSA's own topology
+    cleaning uses, so no molecule-ordering assumption is needed for that step.
 
     For a ``[membrane]`` run, gmx_MMPBSA instead runs against a *reduced*
     protein+ligand-only system from :func:`extract_protein_ligand_system`
@@ -358,9 +358,8 @@ def _stage_mmbsa(
 
         reduced_sire = reduced_system._sire_object
         ligand_mol = list(reduced_sire)[n_protein_molecules]
-        receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_position(
-            reduced_sire, n_protein_molecules, ligand_mol
-        )
+        ligand_moltype = ligand_mol.residues()[0].name().value()
+        receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms(top_file, ligand_moltype)
         write_index(receptor_atoms, ligand_atoms, index_file)
 
         mmpbsa_config = MMPBSAConfig(gb=None, pb=geometry.pb_params())
@@ -378,10 +377,9 @@ def _stage_mmbsa(
         )
 
     production_sire = system._sire_object
-    molecules = list(production_sire)
-    protein_mol = molecules[0]
-    ligand_mol = molecules[1]
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(production_sire, protein_mol, ligand_mol)
+    ligand_mol = list(production_sire)[1]
+    ligand_moltype = ligand_mol.residues()[0].name().value()
+    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms(production_dir / "gromacs.top", ligand_moltype)
     write_index(receptor_atoms, ligand_atoms, index_file)
     mmpbsa_config = MMPBSAConfig()
     input_file = mmpbsa_config.write(stage_dir / "mmpbsa.in")

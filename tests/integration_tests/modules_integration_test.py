@@ -30,7 +30,7 @@ from gbsa_pipeline.docking import (
     load_first_sdf_molecule,
     prepare_ligand_with_meeko,
 )
-from gbsa_pipeline.gromacs_index import select_receptor_and_ligand_atoms_by_number, write_index
+from gbsa_pipeline.gromacs_index import select_receptor_and_ligand_atoms, write_index
 from gbsa_pipeline.md import (
     remove_clashing_solvent_waters,
     run_heating,
@@ -600,16 +600,18 @@ def test_prepare_inputs_run_docking_parametrize_and_solvate_keeps_outputs(
     trajectory_xtc = production_dir / "gromacs.xtc"
     topology_top = production_dir / "gromacs.top"
 
-    # Build the GROMACS index file from the production sire system.
+    # Build the GROMACS index file straight from the production topology.
     # Molecule ordering after parametrization + solvation:
     #   index 0 → protein, index 1 → GAFF ligand, remainder → water and ions.
+    # Only the ligand's moleculetype name is needed to identify it in the
+    # topology; selection itself is driven by moleculetype identity, not
+    # molecule position/number.
     production_sire = production._sire_object
-    production_molecules = list(production_sire)
-    protein_mol = production_molecules[0]
-    ligand_mol = production_molecules[1]
+    ligand_mol = list(production_sire)[1]
+    ligand_moltype = ligand_mol.residues()[0].name().value()
 
     index_file = gbsa_dir / "index.ndx"
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(production_sire, protein_mol, ligand_mol)
+    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms(topology_top, ligand_moltype)
     write_index(receptor_atoms, ligand_atoms, index_file)
     assert index_file.exists()
 

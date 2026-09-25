@@ -1,4 +1,4 @@
-"""Unit tests for gromacs_index: atom selection and index-file writing."""
+"""Unit tests for gromacs_index: moleculetype-based atom selection and index-file writing."""
 
 from __future__ import annotations
 
@@ -7,55 +7,17 @@ from typing import TYPE_CHECKING
 import pytest
 
 from gbsa_pipeline.gromacs_index import (
-    _assert_excluded_molecules_are_stripped_by_cleantop,
-    select_receptor_and_ligand_atoms_by_number,
-    select_receptor_and_ligand_atoms_by_position,
+    _moltype_atom_ranges,
+    _parse_molecules_section,
+    atoms_by_moltype,
+    mmbsa_complex_atoms,
+    mmbsa_index_groups,
+    select_receptor_and_ligand_atoms,
     write_index,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-class _FakeResName:
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def value(self) -> str:
-        return self._name
-
-
-class _FakeResidue:
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def name(self) -> _FakeResName:
-        return _FakeResName(self._name)
-
-
-class _FakeMol:
-    def __init__(self, n_atoms: int, number: int, resname: str = "SOL") -> None:
-        self._n = n_atoms
-        self._num = number
-        self._resname = resname
-
-    def atoms(self) -> range:
-        return range(self._n)
-
-    def number(self) -> int:
-        return self._num
-
-    def residues(self) -> list[_FakeResidue]:
-        return [_FakeResidue(self._resname)]
-
-
-class _FakeSystem:
-    def __init__(self, molecules: list[_FakeMol]) -> None:
-        self._mols = molecules
-
-    def __iter__(self):
-        return iter(self._mols)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -66,162 +28,248 @@ def _read_index(path: Path) -> str:
     return path.read_text()
 
 
-# ---------------------------------------------------------------------------
-# select_receptor_and_ligand_atoms_by_number -- [system] (soluble) convention
-# ---------------------------------------------------------------------------
+_ATOMTYPES_BLOCK = """\
+[ defaults ]
+; nbfunc comb-rule gen-pairs fudgeLJ fudgeQQ
+1 2 yes 0.5 0.833333
+
+[ atomtypes ]
+; name at.num mass charge ptype sigma epsilon
+CT 6 12.0107 0.0 A 0.339967 0.457730
+"""
 
 
-def test_select_by_number_two_molecule_system() -> None:
-    """Protein at idx 0, ligand at idx 1 - correct 1-based atom numbers."""
-    protein = _FakeMol(3, number=1)
-    ligand = _FakeMol(2, number=2)
-    system = _FakeSystem([protein, ligand])
+def _moleculetype_block(name: str, atoms: list[tuple[str, str]]) -> str:
+    """Build a minimal ``[ moleculetype ]`` + ``[ atoms ]`` block ParmEd can parse.
 
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(system, protein, ligand)
-
-    assert receptor_atoms == [1, 2, 3]
-    assert ligand_atoms == [4, 5]
-
-
-def test_select_by_number_three_molecule_system() -> None:
-    """Protein + solvent + ligand - only protein and ligand atoms selected; offsets correct."""
-    protein = _FakeMol(5, number=1)
-    solvent = _FakeMol(10, number=2)
-    ligand = _FakeMol(3, number=3)
-    system = _FakeSystem([protein, solvent, ligand])
-
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(system, protein, ligand)
-
-    assert receptor_atoms == [1, 2, 3, 4, 5]
-    # 5 protein + 10 solvent + 1-based start
-    assert ligand_atoms == [16, 17, 18]
-
-
-def test_select_by_number_protein_not_in_system() -> None:
-    """Protein absent from system - receptor selection comes back empty."""
-    protein = _FakeMol(3, number=1)
-    other = _FakeMol(2, number=2)
-    ligand = _FakeMol(2, number=3)
-    system = _FakeSystem([other, ligand])  # protein not included
-
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(system, protein, ligand)
-
-    assert receptor_atoms == []
-    assert ligand_atoms == [3, 4]
-
-
-def test_select_by_number_ligand_not_in_system() -> None:
-    """Ligand absent from system - ligand selection comes back empty."""
-    protein = _FakeMol(3, number=1)
-    ligand = _FakeMol(2, number=2)
-    other = _FakeMol(2, number=3)
-    system = _FakeSystem([protein, other])  # ligand not included
-
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(system, protein, ligand)
-
-    assert receptor_atoms == [1, 2, 3]
-    assert ligand_atoms == []
-
-
-def test_select_by_number_raises_on_unrecognized_solvent_name() -> None:
-    """Excluded molecule named like real crystallographic water ('HOH') is rejected.
-
-    gmx_MMPBSA's own cleantop() does not strip "HOH" -- unlike "SOL", "WAT",
-    or "TIP3P" -- so a system built from a raw crystal structure (common for
-    CHARMM-GUI-style prebuilt membrane systems) would otherwise silently
-    produce a Receptor/Ligand index that no longer matches the cleaned
-    topology's atom count.
+    ``atoms`` is a list of ``(resname, atomname)`` pairs, one per atom.
     """
-    protein = _FakeMol(3, number=1)
-    ligand = _FakeMol(2, number=2)
-    water = _FakeMol(1, number=3, resname="HOH")
-    system = _FakeSystem([protein, ligand, water])
+    lines = [f"[ moleculetype ]\n{name} 3\n\n[ atoms ]"]
+    for i, (resname, atomname) in enumerate(atoms, start=1):
+        lines.append(f"{i} CT {i} {resname} {atomname} {i} 0.0 12.0107")
+    return "\n".join(lines) + "\n"
+
+
+def _write_top(
+    tmp_path: Path, moleculetypes: dict[str, list[tuple[str, str]]], molecules: list[tuple[str, int]]
+) -> Path:
+    """Write a minimal, ParmEd-parseable GROMACS .top file for a given moleculetype/molecules layout."""
+    parts = [_ATOMTYPES_BLOCK]
+    for name, atoms in moleculetypes.items():
+        parts.append(_moleculetype_block(name, atoms))
+    parts.append("[ system ]\nTest system\n")
+    molecules_lines = "\n".join(f"{name} {count}" for name, count in molecules)
+    parts.append(f"[ molecules ]\n{molecules_lines}\n")
+
+    top_file = tmp_path / "test.top"
+    top_file.write_text("\n".join(parts))
+    return top_file
+
+
+# ---------------------------------------------------------------------------
+# _parse_molecules_section
+# ---------------------------------------------------------------------------
+
+
+def test_parse_molecules_section_parses_compound_counts(tmp_path: Path) -> None:
+    top_file = tmp_path / "raw.top"
+    top_file.write_text(
+        "[ atomtypes ]\n; a bogus section before\nX 1 1.0 0.0 A 0.1 0.1\n\n"
+        "[ molecules ]\n; Compound  #mols\nPROT   1\nSOL 11142\nNA 24\nCL 24\n"
+    )
+
+    compounds = _parse_molecules_section(top_file)
+
+    assert compounds == [("PROT", 1), ("SOL", 11142), ("NA", 24), ("CL", 24)]
+
+
+def test_parse_molecules_section_ignores_other_sections(tmp_path: Path) -> None:
+    top_file = tmp_path / "raw.top"
+    top_file.write_text("[ atoms ]\n1 CT 1 SOL OW 1 0.0 16.0\n\n[ molecules ]\nSOL 3\n")
+
+    compounds = _parse_molecules_section(top_file)
+
+    assert compounds == [("SOL", 3)]
+
+
+# ---------------------------------------------------------------------------
+# _moltype_atom_ranges / atoms_by_moltype
+# ---------------------------------------------------------------------------
+
+
+def test_moltype_atom_ranges_sequential_1_based() -> None:
+    compounds = [("PROT", 1), ("LIG", 1), ("SOL", 3)]
+    template_atom_counts = {"PROT": 3, "LIG": 2, "SOL": 1}
+
+    ranges = _moltype_atom_ranges(compounds, template_atom_counts)
+
+    assert ranges == {
+        "PROT": [(1, 4)],
+        "LIG": [(4, 6)],
+        "SOL": [(6, 7), (7, 8), (8, 9)],
+    }
+
+
+def test_moltype_atom_ranges_raises_on_undefined_moleculetype() -> None:
+    with pytest.raises(ValueError, match="LIG"):
+        _moltype_atom_ranges([("LIG", 1)], template_atom_counts={"PROT": 3})
+
+
+def test_atoms_by_moltype_selects_wanted_names() -> None:
+    ranges = {"PROT": [(1, 4)], "LIG": [(4, 6)], "SOL": [(6, 9)]}
+
+    assert atoms_by_moltype(ranges, ["LIG"]) == [4, 5]
+    assert atoms_by_moltype(ranges, ["PROT", "SOL"]) == [1, 2, 3, 6, 7, 8]
+
+
+def test_atoms_by_moltype_ignores_names_not_present() -> None:
+    ranges = {"PROT": [(1, 4)]}
+
+    assert atoms_by_moltype(ranges, ["NA", "CL"]) == []
+
+
+# ---------------------------------------------------------------------------
+# mmbsa_complex_atoms
+# ---------------------------------------------------------------------------
+
+
+def test_mmbsa_complex_atoms_excludes_recognized_solvent() -> None:
+    ranges = {"PROT": [(1, 4)], "LIG": [(4, 6)], "SOL": [(6, 9)], "NA": [(9, 10)]}
+
+    assert mmbsa_complex_atoms(ranges, total_atoms=9) == [1, 2, 3, 4, 5]
+
+
+def test_mmbsa_complex_atoms_keeps_lipids() -> None:
+    """Lipids must stay in the complex: cleantop() never strips them."""
+    ranges = {"PROT": [(1, 4)], "POP": [(4, 6)], "LIG": [(6, 8)], "SOL": [(8, 11)]}
+
+    assert mmbsa_complex_atoms(ranges, total_atoms=10) == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_mmbsa_complex_atoms_raises_on_unrecognized_solvent_name() -> None:
+    """Water named "HOH" looks like solvent but isn't a name gmx_MMPBSA's cleantop() strips."""
+    ranges = {"PROT": [(1, 4)], "LIG": [(4, 6)], "HOH": [(6, 9)]}
 
     with pytest.raises(ValueError, match="HOH"):
-        select_receptor_and_ligand_atoms_by_number(system, protein, ligand)
+        mmbsa_complex_atoms(ranges, total_atoms=8)
 
 
-def test_select_by_number_accepts_recognized_solvent_name() -> None:
-    """Excluded molecule named "SOL" (gmx_MMPBSA-recognized) passes validation."""
-    protein = _FakeMol(3, number=1)
-    ligand = _FakeMol(2, number=2)
-    water = _FakeMol(1, number=3, resname="SOL")
-    system = _FakeSystem([protein, ligand, water])
+def test_mmbsa_complex_atoms_does_not_flag_structural_residue() -> None:
+    """A non-solvent-looking excluded name (bug elsewhere) is not this function's job to catch."""
+    ranges = {"PROT": [(1, 4)], "LIG": [(4, 6)], "COFACTOR": [(6, 7)]}
 
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(system, protein, ligand)
-
-    assert receptor_atoms == [1, 2, 3]
-    assert ligand_atoms == [4, 5]
+    # COFACTOR is not in _LOOKS_LIKE_SOLVENT_MOLTYPES, so no stray-solvent error --
+    # but it also isn't stripped by cleantop(), so it stays in the complex.
+    assert mmbsa_complex_atoms(ranges, total_atoms=6) == [1, 2, 3, 4, 5, 6]
 
 
 # ---------------------------------------------------------------------------
-# select_receptor_and_ligand_atoms_by_position -- [membrane] convention
+# mmbsa_index_groups
 # ---------------------------------------------------------------------------
 
 
-def test_select_by_position_lipids_land_in_receptor() -> None:
-    """Protein + multiple lipids + ligand -- lipids must join Receptor, not be dropped.
+def test_mmbsa_index_groups_partitions_receptor_and_ligand() -> None:
+    ranges = {"PROT": [(1, 4)], "LIG": [(4, 6)], "SOL": [(6, 9)]}
 
-    gmx_MMPBSA's own topology cleaning strips only water/ions from the
-    complex topology, never lipids -- if lipids were excluded here, the
-    Receptor+Ligand selection would no longer match that cleaned topology.
+    receptor, ligand = mmbsa_index_groups(ranges, total_atoms=8, ligand_moltype="LIG")
+
+    assert receptor == [1, 2, 3]
+    assert ligand == [4, 5]
+
+
+def test_mmbsa_index_groups_lipids_land_in_receptor() -> None:
+    ranges = {"PROT": [(1, 4)], "POP": [(4, 6)], "LIG": [(6, 8)], "SOL": [(8, 11)]}
+
+    receptor, ligand = mmbsa_index_groups(ranges, total_atoms=10, ligand_moltype="LIG")
+
+    assert receptor == [1, 2, 3, 4, 5]
+    assert ligand == [6, 7]
+
+
+def test_mmbsa_index_groups_raises_when_ligand_moltype_absent() -> None:
+    ranges = {"PROT": [(1, 4)], "SOL": [(4, 7)]}
+
+    with pytest.raises(RuntimeError, match="LIG"):
+        mmbsa_index_groups(ranges, total_atoms=6, ligand_moltype="LIG")
+
+
+def test_mmbsa_index_groups_raises_when_ligand_moltype_is_cleantop_stripped_name() -> None:
+    """A ligand accidentally named "SOL" collides with a name cleantop() strips.
+
+    Must fail loudly, not silently write a Ligand group referencing atoms
+    gmx_MMPBSA's own topology cleaning has already removed.
     """
-    protein = _FakeMol(3, number=1)
-    lipid1 = _FakeMol(2, number=2)
-    lipid2 = _FakeMol(2, number=3)
-    ligand = _FakeMol(2, number=4)
-    system = _FakeSystem([protein, lipid1, lipid2, ligand])
+    ranges = {"PROT": [(1, 4)], "SOL": [(4, 7)]}
 
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_position(
-        system, n_solute_molecules=3, ligand=ligand
+    with pytest.raises(ValueError, match="SOL"):
+        mmbsa_index_groups(ranges, total_atoms=6, ligand_moltype="SOL")
+
+
+def test_mmbsa_index_groups_raises_when_receptor_empty() -> None:
+    """Everything besides the ligand is recognized solvent -- no receptor atoms remain."""
+    ranges = {"LIG": [(1, 3)], "SOL": [(3, 6)]}
+
+    with pytest.raises(RuntimeError, match="Protein"):
+        mmbsa_index_groups(ranges, total_atoms=5, ligand_moltype="LIG")
+
+
+# ---------------------------------------------------------------------------
+# select_receptor_and_ligand_atoms -- real ParmEd parse of a minimal .top
+# ---------------------------------------------------------------------------
+
+
+def test_select_receptor_and_ligand_atoms_soluble_convention(tmp_path: Path) -> None:
+    """[system] (soluble) convention: protein + ligand + water + ions."""
+    top_file = _write_top(
+        tmp_path,
+        moleculetypes={
+            "PROT": [("ALA", "CA"), ("ALA", "CB"), ("GLY", "CA")],
+            "LIG": [("LIG", "C1"), ("LIG", "C2")],
+            "SOL": [("SOL", "OW")],
+            "NA": [("NA", "NA")],
+        },
+        molecules=[("PROT", 1), ("LIG", 1), ("SOL", 3), ("NA", 2)],
     )
 
-    assert receptor_atoms == [1, 2, 3, 4, 5, 6, 7]
-    assert ligand_atoms == [8, 9]
+    receptor, ligand = select_receptor_and_ligand_atoms(top_file, "LIG")
+
+    assert receptor == [1, 2, 3]
+    assert ligand == [4, 5]
 
 
-def test_select_by_position_water_and_ions_excluded() -> None:
-    """Water/ions placed after the ligand are excluded from both groups."""
-    protein = _FakeMol(3, number=1)
-    lipid = _FakeMol(2, number=2)
-    ligand = _FakeMol(2, number=3)
-    water = _FakeMol(3, number=4)
-    ion = _FakeMol(1, number=5)
-    system = _FakeSystem([protein, lipid, ligand, water, ion])
-
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_position(
-        system, n_solute_molecules=2, ligand=ligand
+def test_select_receptor_and_ligand_atoms_membrane_convention_lipids_in_receptor(tmp_path: Path) -> None:
+    """[membrane] convention: lipids must join Receptor, not be dropped or excluded."""
+    top_file = _write_top(
+        tmp_path,
+        moleculetypes={
+            "PROT": [("ALA", "CA"), ("ALA", "CB"), ("GLY", "CA")],
+            "POP": [("POP", "P8"), ("POP", "C1")],
+            "LIG": [("LIG", "C1"), ("LIG", "C2")],
+            "SOL": [("SOL", "OW")],
+        },
+        molecules=[("PROT", 1), ("POP", 2), ("LIG", 1), ("SOL", 4)],
     )
 
-    assert receptor_atoms == [1, 2, 3, 4, 5]
-    assert ligand_atoms == [6, 7]
+    receptor, ligand = select_receptor_and_ligand_atoms(top_file, "LIG")
+
+    assert receptor == [1, 2, 3, 4, 5, 6, 7]
+    assert ligand == [8, 9]
 
 
-def test_select_by_position_ligand_not_in_system() -> None:
-    """Ligand absent from system - ligand selection comes back empty."""
-    protein = _FakeMol(3, number=1)
-    lipid = _FakeMol(2, number=2)
-    ligand = _FakeMol(2, number=99)  # not in system
-    system = _FakeSystem([protein, lipid])
-
-    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_position(
-        system, n_solute_molecules=2, ligand=ligand
+def test_select_receptor_and_ligand_atoms_raises_on_hoh_water(tmp_path: Path) -> None:
+    """A prebuilt system naming crystallographic water "HOH" is rejected with a clear message."""
+    top_file = _write_top(
+        tmp_path,
+        moleculetypes={
+            "PROT": [("ALA", "CA"), ("ALA", "CB"), ("GLY", "CA")],
+            "LIG": [("LIG", "C1"), ("LIG", "C2")],
+            "HOH": [("HOH", "O")],
+        },
+        molecules=[("PROT", 1), ("LIG", 1), ("HOH", 500)],
     )
-
-    assert receptor_atoms == [1, 2, 3, 4, 5]
-    assert ligand_atoms == []
-
-
-def test_select_by_position_raises_on_unrecognized_solvent_name() -> None:
-    """Excluded water named "HOH" (not stripped by gmx_MMPBSA's cleantop()) is rejected."""
-    protein = _FakeMol(3, number=1)
-    lipid = _FakeMol(2, number=2)
-    ligand = _FakeMol(2, number=3)
-    water = _FakeMol(1, number=4, resname="HOH")
-    system = _FakeSystem([protein, lipid, ligand, water])
 
     with pytest.raises(ValueError, match="HOH"):
-        select_receptor_and_ligand_atoms_by_position(system, n_solute_molecules=2, ligand=ligand)
+        select_receptor_and_ligand_atoms(top_file, "LIG")
 
 
 # ---------------------------------------------------------------------------
@@ -262,72 +310,3 @@ def test_write_index_raises_when_receptor_empty(tmp_path: Path) -> None:
 def test_write_index_raises_when_ligand_empty(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Ligand"):
         write_index([1, 2, 3], [], tmp_path / "test.ndx")
-
-
-# ---------------------------------------------------------------------------
-# _assert_excluded_molecules_are_stripped_by_cleantop -- robustness edge cases
-# ---------------------------------------------------------------------------
-
-
-def test_assert_cleantop_passes_on_empty_input() -> None:
-    """No excluded molecules at all (e.g. a dry, unsolvated system) -- no-op."""
-    _assert_excluded_molecules_are_stripped_by_cleantop([])
-
-
-def test_assert_cleantop_passes_on_real_2rh1_recognized_names() -> None:
-    """NA/CL from the real tests/testdata/membrane/2rh1/system.top -- both recognized."""
-    mols = [_FakeMol(1, number=1, resname="NA"), _FakeMol(1, number=2, resname="CL")]
-    _assert_excluded_molecules_are_stripped_by_cleantop(mols)
-
-
-def test_assert_cleantop_raises_on_real_2rh1_hoh() -> None:
-    """The real tests/testdata/membrane/2rh1/system.top names its bulk water "HOH", not "SOL"."""
-    mols = [_FakeMol(3, number=1, resname="HOH")]
-    with pytest.raises(ValueError, match="HOH"):
-        _assert_excluded_molecules_are_stripped_by_cleantop(mols)
-
-
-def test_assert_cleantop_reports_all_unrecognized_names_at_once() -> None:
-    """Multiple distinct unrecognized names in one call are all listed, not just the first."""
-    mols = [
-        _FakeMol(3, number=1, resname="HOH"),
-        _FakeMol(1, number=2, resname="MG"),
-        _FakeMol(1, number=3, resname="ZN2"),
-    ]
-    with pytest.raises(ValueError) as excinfo:
-        _assert_excluded_molecules_are_stripped_by_cleantop(mols)
-    message = str(excinfo.value)
-    assert "HOH" in message
-    assert "MG" in message
-    assert "ZN2" in message
-
-
-def test_assert_cleantop_raises_on_misplaced_structural_ion() -> None:
-    """A structural divalent metal (Mg2+/Ca2+/Zn2+) that ends up excluded is also flagged.
-
-    These normally stay inside the protein/Receptor molecule and never reach
-    this check. But if one is ever mis-selected as excluded (e.g. a position/
-    number-boundary bug elsewhere), it must still be caught here: cleantop()
-    does not strip these either, so leaving it excluded silently creates the
-    same atom-count mismatch as an unrecognized solvent name would.
-    """
-    mols = [_FakeMol(1, number=1, resname="MG")]
-    with pytest.raises(ValueError, match="MG"):
-        _assert_excluded_molecules_are_stripped_by_cleantop(mols)
-
-
-def test_assert_cleantop_passes_on_spc_e_slash_variant() -> None:
-    """The slash variant SPC/E, exactly as cleantop() itself lists it, is recognized."""
-    _assert_excluded_molecules_are_stripped_by_cleantop([_FakeMol(3, number=1, resname="SPC/E")])
-
-
-def test_assert_cleantop_case_sensitive_like_cleantop_itself() -> None:
-    """Lowercase "sol" is flagged.
-
-    cleantop() itself does a case-sensitive string match against its
-    hardcoded list, so a lowercase name would silently survive gmx_MMPBSA's
-    own cleaning exactly as it would survive ours if we normalized case here
-    -- flagging it, not normalizing it, mirrors real gmx_MMPBSA behavior.
-    """
-    with pytest.raises(ValueError, match="sol"):
-        _assert_excluded_molecules_are_stripped_by_cleantop([_FakeMol(3, number=1, resname="sol")])
