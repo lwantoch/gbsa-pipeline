@@ -16,16 +16,36 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+class _FakeResName:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def value(self) -> str:
+        return self._name
+
+
+class _FakeResidue:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def name(self) -> _FakeResName:
+        return _FakeResName(self._name)
+
+
 class _FakeMol:
-    def __init__(self, n_atoms: int, number: int) -> None:
+    def __init__(self, n_atoms: int, number: int, resname: str = "SOL") -> None:
         self._n = n_atoms
         self._num = number
+        self._resname = resname
 
     def atoms(self) -> range:
         return range(self._n)
 
     def number(self) -> int:
         return self._num
+
+    def residues(self) -> list[_FakeResidue]:
+        return [_FakeResidue(self._resname)]
 
 
 class _FakeSystem:
@@ -102,6 +122,37 @@ def test_select_by_number_ligand_not_in_system() -> None:
     assert ligand_atoms == []
 
 
+def test_select_by_number_raises_on_unrecognized_solvent_name() -> None:
+    """Excluded molecule named like real crystallographic water ('HOH') is rejected.
+
+    gmx_MMPBSA's own cleantop() does not strip "HOH" -- unlike "SOL", "WAT",
+    or "TIP3P" -- so a system built from a raw crystal structure (common for
+    CHARMM-GUI-style prebuilt membrane systems) would otherwise silently
+    produce a Receptor/Ligand index that no longer matches the cleaned
+    topology's atom count.
+    """
+    protein = _FakeMol(3, number=1)
+    ligand = _FakeMol(2, number=2)
+    water = _FakeMol(1, number=3, resname="HOH")
+    system = _FakeSystem([protein, ligand, water])
+
+    with pytest.raises(ValueError, match="HOH"):
+        select_receptor_and_ligand_atoms_by_number(system, protein, ligand)
+
+
+def test_select_by_number_accepts_recognized_solvent_name() -> None:
+    """Excluded molecule named "SOL" (gmx_MMPBSA-recognized) passes validation."""
+    protein = _FakeMol(3, number=1)
+    ligand = _FakeMol(2, number=2)
+    water = _FakeMol(1, number=3, resname="SOL")
+    system = _FakeSystem([protein, ligand, water])
+
+    receptor_atoms, ligand_atoms = select_receptor_and_ligand_atoms_by_number(system, protein, ligand)
+
+    assert receptor_atoms == [1, 2, 3]
+    assert ligand_atoms == [4, 5]
+
+
 # ---------------------------------------------------------------------------
 # select_receptor_and_ligand_atoms_by_position -- [membrane] convention
 # ---------------------------------------------------------------------------
@@ -158,6 +209,18 @@ def test_select_by_position_ligand_not_in_system() -> None:
 
     assert receptor_atoms == [1, 2, 3, 4, 5]
     assert ligand_atoms == []
+
+
+def test_select_by_position_raises_on_unrecognized_solvent_name() -> None:
+    """Excluded water named "HOH" (not stripped by gmx_MMPBSA's cleantop()) is rejected."""
+    protein = _FakeMol(3, number=1)
+    lipid = _FakeMol(2, number=2)
+    ligand = _FakeMol(2, number=3)
+    water = _FakeMol(1, number=4, resname="HOH")
+    system = _FakeSystem([protein, lipid, ligand, water])
+
+    with pytest.raises(ValueError, match="HOH"):
+        select_receptor_and_ligand_atoms_by_position(system, n_solute_molecules=2, ligand=ligand)
 
 
 # ---------------------------------------------------------------------------

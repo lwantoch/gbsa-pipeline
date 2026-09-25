@@ -13,12 +13,90 @@ from typing import TYPE_CHECKING
 
 import sire
 
+from gbsa_pipeline._constants import ION_RESIDUE_NAMES, WATER_RESIDUE_NAMES
+
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from io import TextIOWrapper
     from pathlib import Path
 
     import sire.system
+
+# Residue names GMXMMPBSA.make_top.cleantop() actually strips from the "-cp"
+# topology before matching it against our Receptor/Ligand index (hardcoded in
+# the installed GMXMMPBSA.make_top source -- there is no public API or CLI
+# flag for this list, so it was read directly out of the installed package).
+# Deliberately narrower than _LOOKS_LIKE_SOLVENT_RESNAMES below: a real
+# prebuilt system (e.g. CHARMM-GUI output) commonly names crystallographic
+# water "HOH", which is NOT in this list and will NOT be stripped by
+# cleantop().
+_CLEANTOP_STRIPPED_RESNAMES: frozenset[str] = frozenset(
+    {
+        "NA",
+        "CL",
+        "SOL",
+        "SOD",
+        "Na+",
+        "CLA",
+        "Cl-",
+        "POT",
+        "K+",
+        "TIP3P",
+        "TIP3",
+        "TP3",
+        "TIPS3P",
+        "TIP3o",
+        "TIP4P",
+        "TIP4PEW",
+        "T4E",
+        "TIP4PD",
+        "TIP5P",
+        "SPC",
+        "SPC/E",
+        "SPCE",
+        "WAT",
+        "OPC",
+    }
+)
+
+# Broader, human-recognizable solvent/ion names -- a superset of what
+# cleantop() actually strips (e.g. it also recognizes "HOH", which
+# cleantop() does not). Built from the package's shared water/ion name
+# constants (see gbsa_pipeline._constants) rather than a fresh list, so this
+# stays in sync with the names other stages already recognize as solvent.
+_LOOKS_LIKE_SOLVENT_RESNAMES: frozenset[str] = WATER_RESIDUE_NAMES | ION_RESIDUE_NAMES
+
+
+def _assert_excluded_molecules_are_stripped_by_cleantop(molecules: Iterable[sire.mol.Molecule]) -> None:
+    """Raise if an excluded molecule looks like solvent/ions but isn't a name cleantop() strips.
+
+    ``molecules`` are the molecules a selection function excludes from both
+    the Receptor and Ligand groups -- assumed to be the water/ions the
+    [system]/[membrane] conventions append after solvation. gmx_MMPBSA's own
+    topology cleaning (``GMXMMPBSA.make_top.cleantop``) strips a hardcoded set
+    of residue names (``_CLEANTOP_STRIPPED_RESNAMES``) from the ``-cp``
+    topology before matching it against our index; a residue name outside
+    that set survives the cleaning and silently inflates the cleaned
+    topology's atom count past what our Receptor+Ligand index expects,
+    surfacing later as a confusing "atom not found in topology" error from
+    gmx_MMPBSA itself. Checking against ``_LOOKS_LIKE_SOLVENT_RESNAMES``
+    catches that gap early, with a clear message, before gmx_MMPBSA ever runs.
+    """
+    unrecognized: set[str] = set()
+    for mol in molecules:
+        for res in mol.residues():
+            name = res.name().value()
+            if name in _LOOKS_LIKE_SOLVENT_RESNAMES and name not in _CLEANTOP_STRIPPED_RESNAMES:
+                unrecognized.add(name)
+
+    if unrecognized:
+        raise ValueError(
+            f"Residue(s) {sorted(unrecognized)} look like solvent/ions but are not names "
+            "gmx_MMPBSA's own topology cleaning (GMXMMPBSA.make_top.cleantop) recognizes -- "
+            "they will survive into the cleaned topology and the atom counts will no longer "
+            f"match the Receptor/Ligand index. Rename them to a recognized name (one of "
+            f"{sorted(_CLEANTOP_STRIPPED_RESNAMES)}) before the MMPBSA stage."
+        )
 
 
 def select_receptor_and_ligand_atoms_by_number(
@@ -32,13 +110,16 @@ def select_receptor_and_ligand_atoms_by_number(
     specific molecule identified by number. Molecules are matched by their
     ``number()`` identifier rather than by Python object identity, so this
     works correctly with sire systems where iteration may yield new wrapper
-    objects around the same underlying C++ molecule.
+    objects around the same underlying C++ molecule. Every other molecule is
+    assumed to be water/ions and validated against gmx_MMPBSA's own topology
+    cleaning via :func:`_assert_excluded_molecules_are_stripped_by_cleantop`.
     """
     protein_num = protein.number()
     ligand_num = ligand.number()
 
     receptor_atoms: list[int] = []
     ligand_atoms: list[int] = []
+    excluded: list[sire.mol.Molecule] = []
     atom_counter = 1  # GROMACS uses 1-based indexing
 
     for mol in system:
@@ -50,8 +131,11 @@ def select_receptor_and_ligand_atoms_by_number(
             receptor_atoms.extend(range(start, end))
         elif num == ligand_num:
             ligand_atoms.extend(range(start, end))
+        else:
+            excluded.append(mol)
         atom_counter = end
 
+    _assert_excluded_molecules_are_stripped_by_cleantop(excluded)
     return receptor_atoms, ligand_atoms
 
 
@@ -64,9 +148,11 @@ def select_receptor_and_ligand_atoms_by_position(
 
     Receptor = every molecule before the ligand (protein + lipids); Ligand =
     the molecule at position ``n_solute_molecules``. Water/ions (appended
-    later by solvation) are excluded from both. Molecules are identified by
-    position, not number, since GROMACS round-trips only ever append new
-    molecules, never reorder existing ones.
+    later by solvation) are excluded from both, and validated against
+    gmx_MMPBSA's own topology cleaning via
+    :func:`_assert_excluded_molecules_are_stripped_by_cleantop`. Molecules are
+    identified by position, not number, since GROMACS round-trips only ever
+    append new molecules, never reorder existing ones.
 
     Lipids must stay in Receptor: gmx_MMPBSA's own topology cleaning
     (``GMXMMPBSA.make_top.cleantop``) strips only water/ions from the ``-cp``
@@ -77,6 +163,7 @@ def select_receptor_and_ligand_atoms_by_position(
 
     receptor_atoms: list[int] = []
     ligand_atoms: list[int] = []
+    excluded: list[sire.mol.Molecule] = []
     atom_counter = 1  # GROMACS uses 1-based indexing
 
     for position, mol in enumerate(system):
@@ -87,8 +174,11 @@ def select_receptor_and_ligand_atoms_by_position(
             ligand_atoms.extend(range(start, end))
         elif position < n_solute_molecules:
             receptor_atoms.extend(range(start, end))
+        else:
+            excluded.append(mol)
         atom_counter = end
 
+    _assert_excluded_molecules_are_stripped_by_cleantop(excluded)
     return receptor_atoms, ligand_atoms
 
 
