@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING
 
 import sire
 
-from gbsa_pipeline._constants import ION_RESIDUE_NAMES, WATER_RESIDUE_NAMES
-
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from io import TextIOWrapper
@@ -26,10 +24,9 @@ if TYPE_CHECKING:
 # topology before matching it against our Receptor/Ligand index (hardcoded in
 # the installed GMXMMPBSA.make_top source -- there is no public API or CLI
 # flag for this list, so it was read directly out of the installed package).
-# Deliberately narrower than _LOOKS_LIKE_SOLVENT_RESNAMES below: a real
-# prebuilt system (e.g. CHARMM-GUI output) commonly names crystallographic
-# water "HOH", which is NOT in this list and will NOT be stripped by
-# cleantop().
+# Notably missing "HOH": a real prebuilt system (e.g. CHARMM-GUI output, or
+# any system carrying raw PDB-style crystallographic water) commonly names
+# bulk water "HOH", which cleantop() will NOT strip.
 _CLEANTOP_STRIPPED_RESNAMES: frozenset[str] = frozenset(
     {
         "NA",
@@ -59,42 +56,42 @@ _CLEANTOP_STRIPPED_RESNAMES: frozenset[str] = frozenset(
     }
 )
 
-# Broader, human-recognizable solvent/ion names -- a superset of what
-# cleantop() actually strips (e.g. it also recognizes "HOH", which
-# cleantop() does not). Built from the package's shared water/ion name
-# constants (see gbsa_pipeline._constants) rather than a fresh list, so this
-# stays in sync with the names other stages already recognize as solvent.
-_LOOKS_LIKE_SOLVENT_RESNAMES: frozenset[str] = WATER_RESIDUE_NAMES | ION_RESIDUE_NAMES
-
 
 def _assert_excluded_molecules_are_stripped_by_cleantop(molecules: Iterable[sire.mol.Molecule]) -> None:
-    """Raise if an excluded molecule looks like solvent/ions but isn't a name cleantop() strips.
+    """Raise if an excluded molecule isn't a residue name gmx_MMPBSA's cleantop() strips.
 
     ``molecules`` are the molecules a selection function excludes from both
-    the Receptor and Ligand groups -- assumed to be the water/ions the
-    [system]/[membrane] conventions append after solvation. gmx_MMPBSA's own
-    topology cleaning (``GMXMMPBSA.make_top.cleantop``) strips a hardcoded set
-    of residue names (``_CLEANTOP_STRIPPED_RESNAMES``) from the ``-cp``
-    topology before matching it against our index; a residue name outside
-    that set survives the cleaning and silently inflates the cleaned
-    topology's atom count past what our Receptor+Ligand index expects,
-    surfacing later as a confusing "atom not found in topology" error from
-    gmx_MMPBSA itself. Checking against ``_LOOKS_LIKE_SOLVENT_RESNAMES``
-    catches that gap early, with a clear message, before gmx_MMPBSA ever runs.
+    the Receptor and Ligand groups -- by the [system]/[membrane] conventions
+    this module relies on, every excluded molecule is assumed to be solvent or
+    ions appended after solvation. gmx_MMPBSA's own topology cleaning
+    (``GMXMMPBSA.make_top.cleantop``) strips only a hardcoded set of residue
+    names (``_CLEANTOP_STRIPPED_RESNAMES``) from the ``-cp`` topology before
+    matching it against our index. Checking every excluded residue's name
+    against that exact set (not a broader "looks like solvent" heuristic --
+    that would silently miss anything not on such a heuristic's own list, and
+    it's the *exact* cleantop() behavior that matters here, not what
+    resembles solvent) is what actually determines whether an excluded
+    molecule survives cleaning: if it isn't a name cleantop() strips, it stays
+    in the cleaned topology and silently inflates its atom count past what our
+    Receptor+Ligand index expects, surfacing later as a confusing "atom not
+    found in topology" error from gmx_MMPBSA itself. This also flags a
+    structural ion (e.g. Mg2+/Ca2+/Zn2+) that ends up excluded: those aren't
+    solvent, but if one lands past the Receptor/Ligand boundary it needs to be
+    caught for the exact same reason -- cleantop() won't strip it either.
     """
     unrecognized: set[str] = set()
     for mol in molecules:
         for res in mol.residues():
             name = res.name().value()
-            if name in _LOOKS_LIKE_SOLVENT_RESNAMES and name not in _CLEANTOP_STRIPPED_RESNAMES:
+            if name not in _CLEANTOP_STRIPPED_RESNAMES:
                 unrecognized.add(name)
 
     if unrecognized:
         raise ValueError(
-            f"Residue(s) {sorted(unrecognized)} look like solvent/ions but are not names "
-            "gmx_MMPBSA's own topology cleaning (GMXMMPBSA.make_top.cleantop) recognizes -- "
-            "they will survive into the cleaned topology and the atom counts will no longer "
-            f"match the Receptor/Ligand index. Rename them to a recognized name (one of "
+            f"Residue(s) {sorted(unrecognized)} are not names gmx_MMPBSA's own topology "
+            "cleaning (GMXMMPBSA.make_top.cleantop) recognizes -- they will survive into "
+            "the cleaned topology and the atom counts will no longer match the "
+            f"Receptor/Ligand index. Rename them to a recognized name (one of "
             f"{sorted(_CLEANTOP_STRIPPED_RESNAMES)}) before the MMPBSA stage."
         )
 

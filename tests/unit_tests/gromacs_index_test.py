@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from gbsa_pipeline.gromacs_index import (
+    _assert_excluded_molecules_are_stripped_by_cleantop,
     select_receptor_and_ligand_atoms_by_number,
     select_receptor_and_ligand_atoms_by_position,
     write_index,
@@ -261,3 +262,72 @@ def test_write_index_raises_when_receptor_empty(tmp_path: Path) -> None:
 def test_write_index_raises_when_ligand_empty(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Ligand"):
         write_index([1, 2, 3], [], tmp_path / "test.ndx")
+
+
+# ---------------------------------------------------------------------------
+# _assert_excluded_molecules_are_stripped_by_cleantop -- robustness edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_assert_cleantop_passes_on_empty_input() -> None:
+    """No excluded molecules at all (e.g. a dry, unsolvated system) -- no-op."""
+    _assert_excluded_molecules_are_stripped_by_cleantop([])
+
+
+def test_assert_cleantop_passes_on_real_2rh1_recognized_names() -> None:
+    """NA/CL from the real tests/testdata/membrane/2rh1/system.top -- both recognized."""
+    mols = [_FakeMol(1, number=1, resname="NA"), _FakeMol(1, number=2, resname="CL")]
+    _assert_excluded_molecules_are_stripped_by_cleantop(mols)
+
+
+def test_assert_cleantop_raises_on_real_2rh1_hoh() -> None:
+    """The real tests/testdata/membrane/2rh1/system.top names its bulk water "HOH", not "SOL"."""
+    mols = [_FakeMol(3, number=1, resname="HOH")]
+    with pytest.raises(ValueError, match="HOH"):
+        _assert_excluded_molecules_are_stripped_by_cleantop(mols)
+
+
+def test_assert_cleantop_reports_all_unrecognized_names_at_once() -> None:
+    """Multiple distinct unrecognized names in one call are all listed, not just the first."""
+    mols = [
+        _FakeMol(3, number=1, resname="HOH"),
+        _FakeMol(1, number=2, resname="MG"),
+        _FakeMol(1, number=3, resname="ZN2"),
+    ]
+    with pytest.raises(ValueError) as excinfo:
+        _assert_excluded_molecules_are_stripped_by_cleantop(mols)
+    message = str(excinfo.value)
+    assert "HOH" in message
+    assert "MG" in message
+    assert "ZN2" in message
+
+
+def test_assert_cleantop_raises_on_misplaced_structural_ion() -> None:
+    """A structural divalent metal (Mg2+/Ca2+/Zn2+) that ends up excluded is also flagged.
+
+    These normally stay inside the protein/Receptor molecule and never reach
+    this check. But if one is ever mis-selected as excluded (e.g. a position/
+    number-boundary bug elsewhere), it must still be caught here: cleantop()
+    does not strip these either, so leaving it excluded silently creates the
+    same atom-count mismatch as an unrecognized solvent name would.
+    """
+    mols = [_FakeMol(1, number=1, resname="MG")]
+    with pytest.raises(ValueError, match="MG"):
+        _assert_excluded_molecules_are_stripped_by_cleantop(mols)
+
+
+def test_assert_cleantop_passes_on_spc_e_slash_variant() -> None:
+    """The slash variant SPC/E, exactly as cleantop() itself lists it, is recognized."""
+    _assert_excluded_molecules_are_stripped_by_cleantop([_FakeMol(3, number=1, resname="SPC/E")])
+
+
+def test_assert_cleantop_case_sensitive_like_cleantop_itself() -> None:
+    """Lowercase "sol" is flagged.
+
+    cleantop() itself does a case-sensitive string match against its
+    hardcoded list, so a lowercase name would silently survive gmx_MMPBSA's
+    own cleaning exactly as it would survive ours if we normalized case here
+    -- flagging it, not normalizing it, mirrors real gmx_MMPBSA behavior.
+    """
+    with pytest.raises(ValueError, match="sol"):
+        _assert_excluded_molecules_are_stripped_by_cleantop([_FakeMol(3, number=1, resname="sol")])
