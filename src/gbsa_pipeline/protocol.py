@@ -345,7 +345,7 @@ def npt(
 
 
 def production(
-    nsteps: int = 50_000,
+    nsteps: int,
     dt: float = 0.002,
     temperature: float = 300.0,
     *,
